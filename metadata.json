@@ -1,0 +1,6 @@
+{
+  "name": "RATISS v3.4 Cognitive Simulator",
+  "description": "Simulateur cognitif interactif 3D pour le modèle RATISS v3.4 - Visualisation 768-D, neuromodulation, mode hallucinatoire, et console de sédimentation sémantique.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
