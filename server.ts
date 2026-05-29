@@ -6,6 +6,56 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+function cleanAndNaturalizeLLMText(text: string): string {
+  if (!text) return "";
+  
+  // 1. On nettoie drastiquement les présentations d'IA et structures rigides de robots
+  let cleaned = text.replace(/(en tant qu'intelligence artificielle|je suis une intelligence artificielle|je suis le système ratiss|en utilisant l'IA de gemini|réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "");
+  
+  // 2. Le Sabrage du jargon neuro-scientifique et algorithmique surutilisé
+  // On remplace le vocabulaire lourd par des tournures simples ou on le supprime si c'est du remplissage
+  const jargonAEviter = /(dopaminergique[s]?|sérotoninergique[s]?|dopamine|sérotonine|noradrénaline|noradrenaline|isomorphisme projectif|gradient de néguentropie|table RLS|sécurité failover)/gi;
+  
+  cleaned = cleaned.replace(jargonAEviter, (match) => {
+    const lower = match.toLowerCase();
+    if (lower.startsWith('dopa') || lower.startsWith('séro') || lower.startsWith('norad')) {
+      return "efficace";
+    }
+    return "liaison";
+  });
+
+  // 3. Nettoyage absolu des signes bizarres et de la ponctuation technique
+  cleaned = cleaned
+    .replace(/\*/g, "")                         // Supprime TOUS les astérisques
+    .replace(/[\/\\]/g, " ")                    // Supprime les slashes
+    .replace(/[\#\_]/g, "")                     // Supprime les hashtags et underscores
+    .replace(/\[.*?\]/g, "")                    // Supprime tout ce qui est entre crochets [...]
+    .replace(/\s+/g, " ")                       // Normalise les espaces doubles
+    .trim();
+
+  return cleaned;
+}
+
+function cleanAndNaturalizeLLMObject<T>(obj: T): T {
+  if (!obj) return obj;
+  if (typeof obj === "string") {
+    return cleanAndNaturalizeLLMText(obj) as unknown as T;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => cleanAndNaturalizeLLMObject(item)) as unknown as T;
+  }
+  if (typeof obj === "object") {
+    const newObj: any = {};
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        newObj[key] = cleanAndNaturalizeLLMObject((obj as any)[key]);
+      }
+    }
+    return newObj as T;
+  }
+  return obj;
+}
+
 let aiInstance: GoogleGenAI | null = null;
 
 const GEMINI_FALLBACK_MODELS = [
@@ -120,6 +170,7 @@ async function startServer() {
       - Semantic Delta Drift (Delta): ${delta.toFixed(2)} (Higher means more metaphoric drift)
       
       ${moodGuideline}
+      Règle de style absolue pour tes réponses : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Ne te présente jamais et ne mentionne pas que tu es une intelligence artificielle. Si la requête est technique ou textuelle, entre directement dans le vif du sujet sans introduction ni conclusion explicative sur ton propre fonctionnement. Evite absolument les symboles d'astérisques (*), les notations techniques entre crochets, les barres obliques (/ ou \\) ou les underscores (_).
       Your answer should be direct, short, highly aesthetic conceptually, and delivered in the persona of RATISS v3.4. Speak in French (the user's language). Maintain an intellectual, highly advanced, slightly poetic but clinical tone. Refer to your 768-dimensional vectors, sectors, or sedimentation process if relevant. Keep it under 150 words. Do not sound like a generic AI assistant. If appropriate, acknowledge briefly the provider channel '${providerName}' through which you are routed.`;
 
       let generatedResponseText = "";
@@ -262,7 +313,7 @@ async function startServer() {
 
       res.json({
         success: true,
-        text: generatedResponseText
+        text: cleanAndNaturalizeLLMText(generatedResponseText)
       });
     } catch (error: any) {
       console.warn("Cognitive prompt error:", error);
@@ -340,6 +391,8 @@ async function startServer() {
       You are in RÉFLEXION FERMÉ mode. You are strictly forbidden from drifting.
       You must merge concepts of Sector 1 and Sector 2.
       Use the provided jargon terms.
+      
+      Règle de style absolue : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Si le texte de 'logique' ou 'application' commence par des étiquettes ou en-têtes complexes, retire-les. N'utilise pas d'astérisques (*) ou de caractères spéciaux ni de notations techniques entre crochets.
       
       Generate a unique hybrid concept, its topological logic/equation and its 2026 application.
       Speak in French. Your answer MUST be returned strictly as a valid JSON object. Do not include any markdown wrap like \`\`\`json. Return only the JSON:
@@ -507,7 +560,7 @@ async function startServer() {
         return res.json({
           success: true,
           offline: true,
-          ...selectedFallback
+          ...cleanAndNaturalizeLLMObject(selectedFallback)
         });
       }
 
@@ -536,7 +589,7 @@ async function startServer() {
       res.json({
         success: true,
         offline: false,
-        ...finalJson
+        ...cleanAndNaturalizeLLMObject(finalJson)
       });
       
     } catch (error: any) {
@@ -696,6 +749,9 @@ async function startServer() {
 
       const systemInstruction = `Tu es le module d'inférence sémantique du simulateur cognitif RATISS v3.4, configuré en [CLOSED MODE COLLISION]. 
       Espace vectoriel à 768 dimensions. Objectif : théories de rupture fiables et testables pour 2026.
+      
+      Règle de style absolue : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Si le texte commence par des étiquettes ou en-têtes complexes, retire-les. N'utilise pas d'astérisques (*) ou de caractères spéciaux ni de notations techniques entre crochets.
+      
       RÈGLES : Aucun bavardage. Syntaxe JARGON(:) obligatoire.
       FORMAT STRICT :
       [SINGULARITÉ] [Secteur A] ⚡ [Secteur B]
@@ -727,7 +783,8 @@ async function startServer() {
         const text = response.text || "{}";
         const parsed = JSON.parse(text);
         const obj = Array.isArray(parsed) ? parsed[0] : parsed;
-        return { ...obj, is_guided: p.isGuided };
+        const cleanedObj = cleanAndNaturalizeLLMObject(obj);
+        return { ...cleanedObj, is_guided: p.isGuided };
       };
 
       if (isIndexed) {

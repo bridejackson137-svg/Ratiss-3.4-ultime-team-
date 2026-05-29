@@ -40,11 +40,22 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
     setActiveSpeech(false);
   }, [lastCollision]);
 
-  const extraireEtNettoyerTexte = (text: string): string => {
-    // Convert rigid preambles to natural transitions
-    let cleanText = text.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "Oui, bonjour. ");
+  const calibrerEtEpurerTexte = (text: string): string => {
+    // Hallucinations are background dynamic drift alerts, default to standard non-salutation mode
+    let cleanText = text;
 
-    // Remove markdown symbols and brackets
+    cleanText = cleanText.replace(/(en tant qu'intelligence artificielle|je suis le système ratiss|en utilisant l'IA de gemini)/gi, "");
+    cleanText = cleanText.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "");
+
+    const jargonAEviter = /(dopaminergique[s]?|sérotoninergique[s]?|dopamine|sérotonine|isomorphisme projectif|gradient de néguentropie|table RLS|sécurité failover)/gi;
+    cleanText = cleanText.replace(jargonAEviter, (match) => {
+      const lower = match.toLowerCase();
+      if (lower.startsWith('dopa') || lower.startsWith('séro')) {
+        return "efficace";
+      }
+      return "liaison";
+    });
+
     cleanText = cleanText
       .replace(/\*/g, "")
       .replace(/[\/\\]/g, " ")
@@ -69,7 +80,7 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
 
     // Focus only on Concept + Logic + Application
     const rawText = `${lastCollision.concept}. ${lastCollision.logique}. Application : ${lastCollision.application}`;
-    const cleanedText = extraireEtNettoyerTexte(rawText);
+    const cleanedText = calibrerEtEpurerTexte(rawText);
 
     const utterance = new SpeechSynthesisUtterance(cleanedText);
     utterance.lang = 'fr-FR';

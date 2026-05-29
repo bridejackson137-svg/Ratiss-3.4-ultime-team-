@@ -24,11 +24,26 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
     };
   }, []);
 
-  const extraireEtNettoyerTexte = (text: string): string => {
-    // Convert rigid preambles to natural transitions
-    let cleanText = text.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "Oui, bonjour. ");
+  const calibrerEtEpurerTexte = (text: string, texteSaisiUtilisateur: string = ""): string => {
+    const estUneSalutation = /^(bonjour|salut|hello|présente|qui es-tu)/i.test(texteSaisiUtilisateur.trim());
+    let cleanText = text;
 
-    // Remove markdown symbols and brackets
+    if (!estUneSalutation) {
+      cleanText = cleanText.replace(/(en tant qu'intelligence artificielle|je suis le système ratiss|en utilisant l'IA de gemini)/gi, "");
+      cleanText = cleanText.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "");
+    } else {
+      cleanText = cleanText.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "Oui, bonjour. ");
+    }
+
+    const jargonAEviter = /(dopaminergique[s]?|sérotoninergique[s]?|dopamine|sérotonine|isomorphisme projectif|gradient de néguentropie|table RLS|sécurité failover)/gi;
+    cleanText = cleanText.replace(jargonAEviter, (match) => {
+      const lower = match.toLowerCase();
+      if (lower.startsWith('dopa') || lower.startsWith('séro')) {
+        return "efficace";
+      }
+      return "liaison";
+    });
+
     cleanText = cleanText
       .replace(/\*/g, "")
       .replace(/[\/\\]/g, " ")
@@ -53,7 +68,7 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
 
     // Text synthesis compilation (only essential Title + Logic + Application)
     const rawText = `${item.titre}. ${item.logique}. Application : ${item.application}`;
-    const cleanedText = extraireEtNettoyerTexte(rawText);
+    const cleanedText = calibrerEtEpurerTexte(rawText, vecteurRecherche);
 
     const utterance = new SpeechSynthesisUtterance(cleanedText);
     utterance.lang = 'fr-FR';

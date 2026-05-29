@@ -36,11 +36,22 @@ export default function ArchiveSingularites() {
     };
   }, []);
 
-  const extraireEtNettoyerTexte = (text: string): string => {
-    // Convert rigid preambles to natural transitions
-    let cleanText = text.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "Oui, bonjour. ");
+  const calibrerEtEpurerTexte = (text: string): string => {
+    // Standard saved singularite archives, direct non-greeting calibration
+    let cleanText = text;
 
-    // Remove markdown symbols and brackets
+    cleanText = cleanText.replace(/(en tant qu'intelligence artificielle|je suis le système ratiss|en utilisant l'IA de gemini)/gi, "");
+    cleanText = cleanText.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "");
+
+    const jargonAEviter = /(dopaminergique[s]?|sérotoninergique[s]?|dopamine|sérotonine|isomorphisme projectif|gradient de néguentropie|table RLS|sécurité failover)/gi;
+    cleanText = cleanText.replace(jargonAEviter, (match) => {
+      const lower = match.toLowerCase();
+      if (lower.startsWith('dopa') || lower.startsWith('séro')) {
+        return "efficace";
+      }
+      return "liaison";
+    });
+
     cleanText = cleanText
       .replace(/\*/g, "")
       .replace(/[\/\\]/g, " ")
@@ -67,7 +78,7 @@ export default function ArchiveSingularites() {
 
     // Only focus on title + logic + application (no technical system metadata)
     const rawText = `${titre}. ${logique}. Application : ${application}`;
-    const cleanedText = extraireEtNettoyerTexte(rawText);
+    const cleanedText = calibrerEtEpurerTexte(rawText);
 
     const utterance = new SpeechSynthesisUtterance(cleanedText);
     utterance.lang = 'fr-FR';
