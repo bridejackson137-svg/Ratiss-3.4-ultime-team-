@@ -7,6 +7,7 @@ import { AbortController } from 'node-abort-controller';
 import { execSync } from "child_process";
 import crypto from "crypto";
 import fs from "fs";
+import https from "https";
 
 dotenv.config();
 
@@ -2233,6 +2234,67 @@ async function startServer() {
     return cleaned;
   }
 
+  async function fetchOnlineTTS(text: string, res: any) {
+    // Découper le texte en segments de max 200 caractères pour Google Translate TTS
+    const chunks: string[] = [];
+    let current = text;
+    while (current.length > 0) {
+      if (current.length <= 200) {
+        chunks.push(current);
+        break;
+      }
+      // Recherche du dernier espace précédant la limite des 200 caractères
+      let index = current.substring(0, 200).lastIndexOf(" ");
+      if (index === -1) {
+        index = 200;
+      }
+      chunks.push(current.substring(0, index));
+      current = current.substring(index).trim();
+    }
+
+    const audioBuffers: Buffer[] = [];
+    
+    // Récupération séquentielle des flux audio mp3
+    for (const chunk of chunks) {
+      const trimmedChunk = chunk.trim();
+      if (!trimmedChunk) continue;
+      
+      const segmentBuffer = await new Promise<Buffer>((resolve, reject) => {
+        // Paramètre de client gtx ultra résistant aux blocages IP et captchas
+        const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=fr&client=gtx&q=${encodeURIComponent(trimmedChunk)}`;
+        const options = {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
+          }
+        };
+        
+        https.get(url, options, (getRes) => {
+          if (getRes.statusCode !== 200) {
+            reject(new Error(`Google TTS status code: ${getRes.statusCode}`));
+            return;
+          }
+          
+          const rawData: Buffer[] = [];
+          getRes.on("data", (chunkData) => {
+            rawData.push(chunkData);
+          });
+          
+          getRes.on("end", () => {
+            resolve(Buffer.concat(rawData));
+          });
+        }).on("error", (err) => {
+          reject(err);
+        });
+      });
+      
+      audioBuffers.push(segmentBuffer);
+    }
+    
+    // Si on arrive ici, tout s'est bien passé de bout en bout ! On envoie l'audio complet fusionné.
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.send(Buffer.concat(audioBuffers));
+  }
+
   app.get("/api/cognitive/tts", async (req, res) => {
     try {
       const text = req.query.text as string;
@@ -2243,23 +2305,39 @@ async function startServer() {
       // Nettoyage phonétique du texte avant validation par le modèle
       const textCalibre = nettoyerTextePourDiction(text);
 
+      const piperPath = "./piper/piper";
+      const modelOnnxPath = "modeles/modele_piper.onnx";
+
+      // 1. Détecte si Piper local est prêt, sinon bascule sans délai sur la solution cloud transparente
+      if (!fs.existsSync(piperPath) || !fs.existsSync(modelOnnxPath)) {
+        console.log("[TTS] Local Piper synthesizer binary or model file is not present. Using server-side online TTS stream fallback.");
+        return await fetchOnlineTTS(textCalibre, res);
+      }
+
       // Generation d'un nom de fichier temporaire unique
       const tempId = crypto.randomBytes(16).toString("hex");
       const tempWavPath = path.join(process.cwd(), `temp_${tempId}.wav`);
 
       // Commande d'execution du binaire Piper avec calibrage d'usine officiel
-      const cmd = `./piper/piper --model modeles/modele_piper.onnx --config modeles/modele_piper.onnx.json --speaker 1 --length_scale 1.25 --noise_scale 0.667 --noise_w 0.800 --output_file "${tempWavPath}"`;
+      const cmd = `${piperPath} --model ${modelOnnxPath} --config modeles/modele_piper.onnx.json --speaker 1 --length_scale 1.25 --noise_scale 0.667 --noise_w 0.800 --output_file "${tempWavPath}"`;
       
-      execSync(cmd, {
-        input: textCalibre,
-        encoding: "utf8"
-      });
-
-      if (!fs.existsSync(tempWavPath)) {
-        throw new Error("L'audio n'a pas pu être synthétisé par Piper.");
+      try {
+        execSync(cmd, {
+          input: textCalibre,
+          encoding: "utf8"
+        });
+      } catch (execErr: any) {
+        console.warn("[TTS] Command execution failed (standard sandbox limits). Falling back to server-side online TTS stream fallback.", execErr.message || execErr);
+        // Si Piper échoue lors de l'exécution, on bascule vers le TTS sémantique en ligne
+        return await fetchOnlineTTS(textCalibre, res);
       }
 
-      // Renvoyer le fichier WAV généré
+      if (!fs.existsSync(tempWavPath)) {
+        console.warn("[TTS] Temporary WAV file was not created by Piper. Falling back to server-side online TTS stream fallback.");
+        return await fetchOnlineTTS(textCalibre, res);
+      }
+
+      // Renvoyer le fichier WAV généré par Piper
       res.setHeader("Content-Type", "audio/wav");
       const fileStream = fs.createReadStream(tempWavPath);
       fileStream.pipe(res);

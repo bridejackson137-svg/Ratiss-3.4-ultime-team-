@@ -27,7 +27,9 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [activeSpeech, setActiveSpeech] = useState<boolean>(false);
+  const [isSpeechPaused, setIsSpeechPaused] = useState<boolean>(false);
   const activeSpeechRef = useRef<boolean>(false);
+  const activeSpeechCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     activeSpeechRef.current = activeSpeech;
@@ -37,22 +39,24 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
   useEffect(() => {
     const handleGlobalSpeechStop = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      // For HallucinationMonitor, we use a unique ID "hallucination-collision" or similar
+      // For HallucinationMonitor, we use a unique ID 'hallucination-collision'
       if (detail && detail.sourceId !== 'hallucination-collision') {
-        if (audioRef.current) {
-          audioRef.current.pause();
-          audioRef.current = null;
+        if (activeSpeechCancelRef.current) {
+          activeSpeechCancelRef.current();
+          activeSpeechCancelRef.current = null;
         }
+        setIsSpeechPaused(false);
         setActiveSpeech(false);
       }
     };
     window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
 
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
       }
+      setIsSpeechPaused(false);
       window.speechSynthesis.cancel();
       window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
@@ -95,43 +99,63 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
     return cleanText;
   };
 
+  const handleToggleHallucinationPause = () => {
+    if (!activeSpeech) return;
+    
+    if (isSpeechPaused) {
+      if (audioRef.current) {
+        audioRef.current.play().catch(() => {});
+      }
+      if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+      setIsSpeechPaused(false);
+    } else {
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        window.speechSynthesis.pause();
+      }
+      setIsSpeechPaused(true);
+    }
+  };
+
   const handleTTS = () => {
     if (!lastCollision) return;
 
     if (activeSpeech) {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
       }
-      if ((window as any).__activeAudio === audioRef.current) {
-        (window as any).__activeAudio = null;
-      }
-      window.speechSynthesis.cancel();
       setActiveSpeech(false);
+      setIsSpeechPaused(false);
       return;
     }
 
-    // Stop current local or native speech globally
+    // Arrêter toute lecture active globale avant d'en lancer une nouvelle
     if ((window as any).__activeAudio) {
       try {
         (window as any).__activeAudio.pause();
+        (window as any).__activeAudio.src = "";
       } catch (e) {}
       (window as any).__activeAudio = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+    if (activeSpeechCancelRef.current) {
+      activeSpeechCancelRef.current();
+      activeSpeechCancelRef.current = null;
     }
-    window.speechSynthesis.cancel();
+    setIsSpeechPaused(false);
 
-    // Trigger global synchronization event so other components clear their playing state
+    // Déclencher l'événement d'arrêt global pour synchroniser les autres composants
     window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: 'hallucination-collision' } }));
 
     // Focus only on Concept + Logic + Application
     const rawText = `${lastCollision.concept}. ${lastCollision.logique}. Application : ${lastCollision.application}`;
     const cleanedText = calibrerEtEpurerTexte(rawText);
 
-    // Encode text for local Piper TTS API
+    // Encodage
     const encodedText = encodeURIComponent(cleanedText);
     const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
@@ -139,81 +163,101 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
     audioRef.current = audio;
     (window as any).__activeAudio = audio;
     setActiveSpeech(true);
+    setIsSpeechPaused(false);
+
+    let cancelled = false;
+    activeSpeechCancelRef.current = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = ""; // Coupe instantanément le chargement réseau
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
 
     audio.play().catch(err => {
-      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (cancelled) return;
       if (err.name === 'AbortError') {
         return;
       }
       console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      activerVoixNavigateur();
+    });
+
+    audio.onended = () => {
+      if (cancelled) return;
+      setActiveSpeech(false);
+      setIsSpeechPaused(false);
+      if (activeSpeechCancelRef.current === activerCancellationTTS) {
+        activeSpeechCancelRef.current = null;
+      }
+    };
+
+    audio.onerror = () => {
+      if (cancelled) return;
+      console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+      activerVoixNavigateur();
+    };
+
+    const activerCancellationTTS = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = "";
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
+    activeSpeechCancelRef.current = activerCancellationTTS;
+
+    function activerVoixNavigateur() {
       try {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(cleanedText);
         utterance.lang = 'fr-FR';
         utterance.rate = 1.05;
         utterance.pitch = 0.85;
+
         utterance.onend = () => {
-          if (activeSpeechRef.current) {
-            setActiveSpeech(false);
+          if (cancelled) return;
+          setActiveSpeech(false);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
         utterance.onerror = () => {
-          if (activeSpeechRef.current) {
-            setActiveSpeech(false);
+          if (cancelled) return;
+          setActiveSpeech(false);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
+        const activerCancellationBrowser = () => {
+          cancelled = true;
+          window.speechSynthesis.cancel();
+          setIsSpeechPaused(false);
+        };
+        activeSpeechCancelRef.current = activerCancellationBrowser;
+
         window.speechSynthesis.speak(utterance);
       } catch (synthErr) {
-        if (activeSpeechRef.current) {
+        if (!cancelled) {
           setActiveSpeech(false);
+          setIsSpeechPaused(false);
         }
       }
-    });
-
-    audio.onended = () => {
-      if (activeSpeechRef.current) {
-        setActiveSpeech(false);
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
-
-    audio.onerror = () => {
-      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
-      if (activeSpeechRef.current) {
-        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(cleanedText);
-          utterance.lang = 'fr-FR';
-          utterance.rate = 1.05;
-          utterance.pitch = 0.85;
-          utterance.onend = () => {
-            if (activeSpeechRef.current) {
-              setActiveSpeech(false);
-            }
-          };
-          utterance.onerror = () => {
-            if (activeSpeechRef.current) {
-              setActiveSpeech(false);
-            }
-          };
-          window.speechSynthesis.speak(utterance);
-        } catch (synthErr) {
-          setActiveSpeech(false);
-        }
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
+    }
   };
 
   // Animate dynamic waveform on Canvas to represent Delta Semantic Drift
@@ -397,7 +441,7 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
             <div className="bg-neutral-900/30 p-3 rounded border border-purple-900/30 space-y-2.5 text-[11px] leading-relaxed relative overflow-hidden">
               <div className="absolute top-0 right-0 w-16 h-16 bg-purple-500/5 rounded-full blur-xl pointer-events-none" />
               
-              <div className="absolute top-2.5 right-2.5 flex items-center z-10">
+              <div className="absolute top-2.5 right-2.5 flex gap-1 items-center z-10">
                 <button
                   onClick={handleTTS}
                   className={`px-2 py-0.5 rounded text-[8.5px] font-bold tracking-wider transition-all border ${
@@ -408,6 +452,14 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
                 >
                   {activeSpeech ? '⏹ STOP AUDIO' : '🔊 RÉSUMÉ AUDIO'}
                 </button>
+                {activeSpeech && (
+                  <button
+                    onClick={() => handleToggleHallucinationPause()}
+                    className="px-2 py-0.5 rounded text-[8.5px] font-bold tracking-wider transition-all border bg-amber-950/80 border-amber-500/50 text-amber-400 hover:bg-amber-900/60"
+                  >
+                    {isSpeechPaused ? '▶️ REPRENDRE' : '⏸ PAUSE'}
+                  </button>
+                )}
               </div>
 
               <div className="pr-20">

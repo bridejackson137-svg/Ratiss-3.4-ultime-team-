@@ -16,8 +16,10 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
   const [logsState, setLogsState] = useState<string[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [activeSpeechId, setActiveSpeechId] = useState<string | null>(null);
+  const [isSpeechPaused, setIsSpeechPaused] = useState<boolean>(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeSpeechIdRef = useRef<string | null>(null);
+  const activeSpeechCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     activeSpeechIdRef.current = activeSpeechId;
@@ -28,20 +30,22 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
     const handleGlobalSpeechStop = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail && detail.sourceId !== activeSpeechIdRef.current) {
-        if (audioRef.current) {
-          audioRef.current.pause();
-          audioRef.current = null;
+        if (activeSpeechCancelRef.current) {
+          activeSpeechCancelRef.current();
+          activeSpeechCancelRef.current = null;
         }
+        setIsSpeechPaused(false);
         setActiveSpeechId(null);
       }
     };
     window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
 
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
       }
+      setIsSpeechPaused(false);
       window.speechSynthesis.cancel();
       window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
@@ -78,42 +82,62 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
     return cleanText;
   };
 
-  const handleTTS = (item: ConceptExtended) => {
-    // If the clicked one is speaking, stop it unconditionally
-    if (activeSpeechId === item.id) {
+  const handleTogglePause = () => {
+    if (!activeSpeechId) return;
+    
+    if (isSpeechPaused) {
+      if (audioRef.current) {
+        audioRef.current.play().catch(() => {});
+      }
+      if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+      setIsSpeechPaused(false);
+    } else {
       if (audioRef.current) {
         audioRef.current.pause();
-        audioRef.current = null;
       }
-      if ((window as any).__activeAudio === audioRef.current) {
-        (window as any).__activeAudio = null;
+      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        window.speechSynthesis.pause();
       }
-      window.speechSynthesis.cancel();
+      setIsSpeechPaused(true);
+    }
+  };
+
+  const handleTTS = (item: ConceptExtended) => {
+    // Si l'objet cliqué est déjà en cours de lecture, on l'arrête inconditionnellement
+    if (activeSpeechId === item.id) {
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
+      }
       setActiveSpeechId(null);
+      setIsSpeechPaused(false);
       return;
     }
 
-    // Stop current local or native speech globally
+    // Arrêter toute lecture active globale avant d'en lancer une nouvelle
     if ((window as any).__activeAudio) {
       try {
         (window as any).__activeAudio.pause();
+        (window as any).__activeAudio.src = "";
       } catch (e) {}
       (window as any).__activeAudio = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+    if (activeSpeechCancelRef.current) {
+      activeSpeechCancelRef.current();
+      activeSpeechCancelRef.current = null;
     }
-    window.speechSynthesis.cancel();
+    setIsSpeechPaused(false);
 
-    // Trigger global synchronization event so other components clear their playing state
+    // Déclencher l'événement d'arrêt global pour synchroniser les autres composants
     window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: item.id } }));
 
-    // Text synthesis compilation (only essential Title + Logic + Application)
+    // Compilation textuelle (Titre + Logique + Application)
     const rawText = `${item.titre}. ${item.logique}. Application : ${item.application}`;
     const cleanedText = calibrerEtEpurerTexte(rawText, vecteurRecherche);
 
-    // Encode text for local Piper TTS API
+    // Encodage
     const encodedText = encodeURIComponent(cleanedText);
     const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
@@ -121,81 +145,101 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
     audioRef.current = audio;
     (window as any).__activeAudio = audio;
     setActiveSpeechId(item.id);
+    setIsSpeechPaused(false);
+
+    let cancelled = false;
+    activeSpeechCancelRef.current = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = ""; // Coupe instantanément le chargement réseau
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
 
     audio.play().catch(err => {
-      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (cancelled) return;
       if (err.name === 'AbortError') {
         return;
       }
       console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      activerVoixNavigateur();
+    });
+
+    audio.onended = () => {
+      if (cancelled) return;
+      setActiveSpeechId(null);
+      setIsSpeechPaused(false);
+      if (activeSpeechCancelRef.current === activerCancellationTTS) {
+        activeSpeechCancelRef.current = null;
+      }
+    };
+
+    audio.onerror = () => {
+      if (cancelled) return;
+      console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+      activerVoixNavigateur();
+    };
+
+    const activerCancellationTTS = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = "";
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
+    activeSpeechCancelRef.current = activerCancellationTTS;
+
+    function activerVoixNavigateur() {
       try {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(cleanedText);
         utterance.lang = 'fr-FR';
         utterance.rate = 1.05;
         utterance.pitch = 0.85;
+
         utterance.onend = () => {
-          if (activeSpeechIdRef.current === item.id) {
-            setActiveSpeechId(null);
+          if (cancelled) return;
+          setActiveSpeechId(null);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
         utterance.onerror = () => {
-          if (activeSpeechIdRef.current === item.id) {
-            setActiveSpeechId(null);
+          if (cancelled) return;
+          setActiveSpeechId(null);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
+        const activerCancellationBrowser = () => {
+          cancelled = true;
+          window.speechSynthesis.cancel();
+          setIsSpeechPaused(false);
+        };
+        activeSpeechCancelRef.current = activerCancellationBrowser;
+
         window.speechSynthesis.speak(utterance);
       } catch (synthErr) {
-        if (activeSpeechIdRef.current === item.id) {
+        if (!cancelled) {
           setActiveSpeechId(null);
+          setIsSpeechPaused(false);
         }
       }
-    });
-
-    audio.onended = () => {
-      if (activeSpeechIdRef.current === item.id) {
-        setActiveSpeechId(null);
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
-
-    audio.onerror = () => {
-      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
-      if (activeSpeechIdRef.current === item.id) {
-        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(cleanedText);
-          utterance.lang = 'fr-FR';
-          utterance.rate = 1.05;
-          utterance.pitch = 0.85;
-          utterance.onend = () => {
-            if (activeSpeechIdRef.current === item.id) {
-              setActiveSpeechId(null);
-            }
-          };
-          utterance.onerror = () => {
-            if (activeSpeechIdRef.current === item.id) {
-              setActiveSpeechId(null);
-            }
-          };
-          window.speechSynthesis.speak(utterance);
-        } catch (synthErr) {
-          setActiveSpeechId(null);
-        }
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
+    }
   };
 
   // UI CONTROLS
@@ -369,6 +413,17 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
                     >
                       {activeSpeechId === item.id ? '⏹ STOP AUDIO' : '🔊 RÉSUMÉ AUDIO'}
                     </button>
+                    {activeSpeechId === item.id && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTogglePause();
+                        }}
+                        className="px-2 py-0.5 rounded text-[8.5px] font-bold tracking-wider transition-all border bg-amber-950/80 border-amber-500/50 text-amber-400 hover:bg-amber-900/60"
+                      >
+                        {isSpeechPaused ? '▶️ REPRENDRE' : '⏸ PAUSE'}
+                      </button>
+                    )}
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-[8px] font-bold text-neutral-700">{item.timestamp}</span>

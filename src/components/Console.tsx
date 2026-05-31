@@ -25,9 +25,11 @@ export const Console: React.FC<ConsoleProps> = ({
   const [lastSedimented, setLastSedimented] = useState<{ concept: string; jargon: string } | null>(null);
   const [isConsoleExpanded, setIsConsoleExpanded] = useState(false);
   const [activeConsoleSpeechId, setActiveConsoleSpeechId] = useState<string | null>(null);
+  const [isSpeechPaused, setIsSpeechPaused] = useState<boolean>(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeConsoleSpeechIdRef = useRef<string | null>(null);
+  const activeSpeechCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     activeConsoleSpeechIdRef.current = activeConsoleSpeechId;
@@ -38,20 +40,22 @@ export const Console: React.FC<ConsoleProps> = ({
     const handleGlobalSpeechStop = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail && detail.sourceId !== activeConsoleSpeechIdRef.current) {
-        if (audioRef.current) {
-          audioRef.current.pause();
-          audioRef.current = null;
+        if (activeSpeechCancelRef.current) {
+          activeSpeechCancelRef.current();
+          activeSpeechCancelRef.current = null;
         }
+        setIsSpeechPaused(false);
         setActiveConsoleSpeechId(null);
       }
     };
     window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
 
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
       }
+      setIsSpeechPaused(false);
       window.speechSynthesis.cancel();
       window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
@@ -88,40 +92,61 @@ export const Console: React.FC<ConsoleProps> = ({
     return cleanText;
   };
 
-  const handleConsoleTTS = (entry: ConsoleEntry) => {
-    if (activeConsoleSpeechId === entry.id) {
+  const handleToggleConsolePause = () => {
+    if (!activeConsoleSpeechId) return;
+    
+    if (isSpeechPaused) {
+      if (audioRef.current) {
+        audioRef.current.play().catch(() => {});
+      }
+      if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+      setIsSpeechPaused(false);
+    } else {
       if (audioRef.current) {
         audioRef.current.pause();
-        audioRef.current = null;
       }
-      if ((window as any).__activeAudio === audioRef.current) {
-        (window as any).__activeAudio = null;
+      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        window.speechSynthesis.pause();
       }
-      window.speechSynthesis.cancel();
+      setIsSpeechPaused(true);
+    }
+  };
+
+  const handleConsoleTTS = (entry: ConsoleEntry) => {
+    // Si l'objet cliqué est déjà en cours de lecture, on l'arrête inconditionnellement
+    if (activeConsoleSpeechId === entry.id) {
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
+      }
       setActiveConsoleSpeechId(null);
+      setIsSpeechPaused(false);
       return;
     }
 
-    // Stop current local or native speech globally
+    // Arrêter toute lecture active globale avant d'en lancer une nouvelle
     if ((window as any).__activeAudio) {
       try {
         (window as any).__activeAudio.pause();
+        (window as any).__activeAudio.src = "";
       } catch (e) {}
       (window as any).__activeAudio = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+    if (activeSpeechCancelRef.current) {
+      activeSpeechCancelRef.current();
+      activeSpeechCancelRef.current = null;
     }
-    window.speechSynthesis.cancel();
+    setIsSpeechPaused(false);
 
-    // Trigger global synchronization event so other components clear their playing state
+    // Déclencher l'événement d'arrêt global pour synchroniser les autres composants
     window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: entry.id } }));
 
     const rawText = entry.text.trim();
     const cleanedText = cleanAndNaturalizeConsoleSpeech(rawText, discussionValue);
 
-    // Encode text for local Piper TTS API
+    // Encodage
     const encodedText = encodeURIComponent(cleanedText);
     const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
@@ -129,81 +154,101 @@ export const Console: React.FC<ConsoleProps> = ({
     audioRef.current = audio;
     (window as any).__activeAudio = audio;
     setActiveConsoleSpeechId(entry.id);
+    setIsSpeechPaused(false);
+
+    let cancelled = false;
+    activeSpeechCancelRef.current = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = ""; // Coupe instantanément le chargement réseau
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
 
     audio.play().catch(err => {
-      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (cancelled) return;
       if (err.name === 'AbortError') {
         return;
       }
       console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      activerVoixNavigateur();
+    });
+
+    audio.onended = () => {
+      if (cancelled) return;
+      setActiveConsoleSpeechId(null);
+      setIsSpeechPaused(false);
+      if (activeSpeechCancelRef.current === activerCancellationTTS) {
+        activeSpeechCancelRef.current = null;
+      }
+    };
+
+    audio.onerror = () => {
+      if (cancelled) return;
+      console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+      activerVoixNavigateur();
+    };
+
+    const activerCancellationTTS = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = "";
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
+    activeSpeechCancelRef.current = activerCancellationTTS;
+
+    function activerVoixNavigateur() {
       try {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(cleanedText);
         utterance.lang = 'fr-FR';
         utterance.rate = 1.05;
         utterance.pitch = 0.85;
+
         utterance.onend = () => {
-          if (activeConsoleSpeechIdRef.current === entry.id) {
-            setActiveConsoleSpeechId(null);
+          if (cancelled) return;
+          setActiveConsoleSpeechId(null);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
         utterance.onerror = () => {
-          if (activeConsoleSpeechIdRef.current === entry.id) {
-            setActiveConsoleSpeechId(null);
+          if (cancelled) return;
+          setActiveConsoleSpeechId(null);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
+        const activerCancellationBrowser = () => {
+          cancelled = true;
+          window.speechSynthesis.cancel();
+          setIsSpeechPaused(false);
+        };
+        activeSpeechCancelRef.current = activerCancellationBrowser;
+
         window.speechSynthesis.speak(utterance);
       } catch (synthErr) {
-        if (activeConsoleSpeechIdRef.current === entry.id) {
+        if (!cancelled) {
           setActiveConsoleSpeechId(null);
+          setIsSpeechPaused(false);
         }
       }
-    });
-
-    audio.onended = () => {
-      if (activeConsoleSpeechIdRef.current === entry.id) {
-        setActiveConsoleSpeechId(null);
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
-
-    audio.onerror = () => {
-      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
-      if (activeConsoleSpeechIdRef.current === entry.id) {
-        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(cleanedText);
-          utterance.lang = 'fr-FR';
-          utterance.rate = 1.05;
-          utterance.pitch = 0.85;
-          utterance.onend = () => {
-            if (activeConsoleSpeechIdRef.current === entry.id) {
-              setActiveConsoleSpeechId(null);
-            }
-          };
-          utterance.onerror = () => {
-            if (activeConsoleSpeechIdRef.current === entry.id) {
-              setActiveConsoleSpeechId(null);
-            }
-          };
-          window.speechSynthesis.speak(utterance);
-        } catch (synthErr) {
-          setActiveConsoleSpeechId(null);
-        }
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
+    }
   };
 
   // Auto-scroll on new entries
@@ -341,7 +386,7 @@ export const Console: React.FC<ConsoleProps> = ({
                       <div className={`text-neutral-300 bg-neutral-900/30 rounded border border-neutral-950 whitespace-pre-line leading-relaxed select-text shadow-inner transition-all ${isConsoleExpanded ? 'p-4 pr-24 text-xs sm:text-sm bg-neutral-900/50 gap-2 border-neutral-800' : 'p-2 pr-20 text-[11px]'}`}>
                         {entry.text}
                       </div>
-                      <div className="absolute top-2.5 right-2">
+                      <div className="absolute top-2.5 right-2 flex gap-1 items-center">
                         <button
                           onClick={() => handleConsoleTTS(entry)}
                           className={`px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all border ${
@@ -352,6 +397,14 @@ export const Console: React.FC<ConsoleProps> = ({
                         >
                           {activeConsoleSpeechId === entry.id ? '⏹ STOP AUDIO' : '🔊 RÉSUMÉ AUDIO'}
                         </button>
+                        {activeConsoleSpeechId === entry.id && (
+                          <button
+                            onClick={() => handleToggleConsolePause()}
+                            className="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all border bg-amber-950/80 border-amber-500/50 text-amber-400 hover:bg-amber-900/60"
+                          >
+                            {isSpeechPaused ? '▶️ REPRENDRE' : '⏸ PAUSE'}
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}

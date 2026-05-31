@@ -26,10 +26,12 @@ export default function ArchiveSingularites() {
   const [revesLucides, setRevesLucides] = useState<ReveLucide[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [activeSpeechId, setActiveSpeechId] = useState<string | null>(null);
+  const [isSpeechPaused, setIsSpeechPaused] = useState<boolean>(false);
   const [loading, setLoading] = useState(false);
   const [errorInfo, setErrorInfo] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeSpeechIdRef = useRef<string | null>(null);
+  const activeSpeechCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     activeSpeechIdRef.current = activeSpeechId;
@@ -40,20 +42,22 @@ export default function ArchiveSingularites() {
     const handleGlobalSpeechStop = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail && detail.sourceId !== activeSpeechIdRef.current) {
-        if (audioRef.current) {
-          audioRef.current.pause();
-          audioRef.current = null;
+        if (activeSpeechCancelRef.current) {
+          activeSpeechCancelRef.current();
+          activeSpeechCancelRef.current = null;
         }
+        setIsSpeechPaused(false);
         setActiveSpeechId(null);
       }
     };
     window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
 
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
       }
+      setIsSpeechPaused(false);
       window.speechSynthesis.cancel();
       window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
@@ -86,34 +90,55 @@ export default function ArchiveSingularites() {
     return cleanText;
   };
 
-  const handleTTS = (reve: ReveLucide) => {
-    if (activeSpeechId === reve.id) {
+  const handleToggleArchivePause = () => {
+    if (!activeSpeechId) return;
+    
+    if (isSpeechPaused) {
+      if (audioRef.current) {
+        audioRef.current.play().catch(() => {});
+      }
+      if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+      setIsSpeechPaused(false);
+    } else {
       if (audioRef.current) {
         audioRef.current.pause();
-        audioRef.current = null;
       }
-      if ((window as any).__activeAudio === audioRef.current) {
-        (window as any).__activeAudio = null;
+      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        window.speechSynthesis.pause();
       }
-      window.speechSynthesis.cancel();
+      setIsSpeechPaused(true);
+    }
+  };
+
+  const handleTTS = (reve: ReveLucide) => {
+    // Si l'objet cliqué est déjà en cours de lecture, on l'arrête inconditionnellement
+    if (activeSpeechId === reve.id) {
+      if (activeSpeechCancelRef.current) {
+        activeSpeechCancelRef.current();
+        activeSpeechCancelRef.current = null;
+      }
       setActiveSpeechId(null);
+      setIsSpeechPaused(false);
       return;
     }
 
-    // Stop current local or native speech globally
+    // Arrêter toute lecture active globale avant d'en lancer une nouvelle
     if ((window as any).__activeAudio) {
       try {
         (window as any).__activeAudio.pause();
+        (window as any).__activeAudio.src = "";
       } catch (e) {}
       (window as any).__activeAudio = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+    if (activeSpeechCancelRef.current) {
+      activeSpeechCancelRef.current();
+      activeSpeechCancelRef.current = null;
     }
-    window.speechSynthesis.cancel();
+    setIsSpeechPaused(false);
 
-    // Trigger global synchronization event so other components clear their playing state
+    // Déclencher l'événement d'arrêt global pour synchroniser les autres composants
     window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: reve.id } }));
 
     const titre = reve.titre || reve.concept_hybride || reve.concept || 'Concept stabilisé';
@@ -124,7 +149,7 @@ export default function ArchiveSingularites() {
     const rawText = `${titre}. ${logique}. Application : ${application}`;
     const cleanedText = calibrerEtEpurerTexte(rawText);
 
-    // Encode text for local Piper TTS API
+    // Encodage
     const encodedText = encodeURIComponent(cleanedText);
     const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
@@ -132,81 +157,101 @@ export default function ArchiveSingularites() {
     audioRef.current = audio;
     (window as any).__activeAudio = audio;
     setActiveSpeechId(reve.id);
+    setIsSpeechPaused(false);
+
+    let cancelled = false;
+    activeSpeechCancelRef.current = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = ""; // Coupe instantanément le chargement réseau
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
 
     audio.play().catch(err => {
-      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (cancelled) return;
       if (err.name === 'AbortError') {
         return;
       }
       console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      activerVoixNavigateur();
+    });
+
+    audio.onended = () => {
+      if (cancelled) return;
+      setActiveSpeechId(null);
+      setIsSpeechPaused(false);
+      if (activeSpeechCancelRef.current === activerCancellationTTS) {
+        activeSpeechCancelRef.current = null;
+      }
+    };
+
+    audio.onerror = () => {
+      if (cancelled) return;
+      console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+      activerVoixNavigateur();
+    };
+
+    const activerCancellationTTS = () => {
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = "";
+      } catch (e) {}
+      window.speechSynthesis.cancel();
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+      setIsSpeechPaused(false);
+    };
+    activeSpeechCancelRef.current = activerCancellationTTS;
+
+    function activerVoixNavigateur() {
       try {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(cleanedText);
         utterance.lang = 'fr-FR';
         utterance.rate = 1.05;
         utterance.pitch = 0.85;
+
         utterance.onend = () => {
-          if (activeSpeechIdRef.current === reve.id) {
-            setActiveSpeechId(null);
+          if (cancelled) return;
+          setActiveSpeechId(null);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
         utterance.onerror = () => {
-          if (activeSpeechIdRef.current === reve.id) {
-            setActiveSpeechId(null);
+          if (cancelled) return;
+          setActiveSpeechId(null);
+          setIsSpeechPaused(false);
+          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
+            activeSpeechCancelRef.current = null;
           }
         };
+
+        const activerCancellationBrowser = () => {
+          cancelled = true;
+          window.speechSynthesis.cancel();
+          setIsSpeechPaused(false);
+        };
+        activeSpeechCancelRef.current = activerCancellationBrowser;
+
         window.speechSynthesis.speak(utterance);
       } catch (synthErr) {
-        if (activeSpeechIdRef.current === reve.id) {
+        if (!cancelled) {
           setActiveSpeechId(null);
+          setIsSpeechPaused(false);
         }
       }
-    });
-
-    audio.onended = () => {
-      if (activeSpeechIdRef.current === reve.id) {
-        setActiveSpeechId(null);
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
-
-    audio.onerror = () => {
-      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
-      if (activeSpeechIdRef.current === reve.id) {
-        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(cleanedText);
-          utterance.lang = 'fr-FR';
-          utterance.rate = 1.05;
-          utterance.pitch = 0.85;
-          utterance.onend = () => {
-            if (activeSpeechIdRef.current === reve.id) {
-              setActiveSpeechId(null);
-            }
-          };
-          utterance.onerror = () => {
-            if (activeSpeechIdRef.current === reve.id) {
-              setActiveSpeechId(null);
-            }
-          };
-          window.speechSynthesis.speak(utterance);
-        } catch (synthErr) {
-          setActiveSpeechId(null);
-        }
-      }
-      if (audioRef.current === audio) {
-        audioRef.current = null;
-      }
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-    };
+    }
   };
 
   // Load from both Local Cache and Supabase if active
@@ -487,6 +532,14 @@ export default function ArchiveSingularites() {
                   >
                     {activeSpeechId === reve.id ? '⏹ STOP AUDIO' : '🔊 RÉSUMÉ AUDIO'}
                   </button>
+                  {activeSpeechId === reve.id && (
+                    <button
+                      onClick={() => handleToggleArchivePause()}
+                      className="px-2 py-1 rounded text-[9px] flex items-center gap-1 transition-all duration-200 cursor-pointer border shadow-sm bg-amber-950/80 border-amber-500/50 text-amber-400 hover:bg-amber-900/60"
+                    >
+                      {isSpeechPaused ? '▶️ REPRENDRE' : '⏸ PAUSE'}
+                    </button>
+                  )}
 
                   <button 
                     onClick={() => copyToClipboard(reve)}
