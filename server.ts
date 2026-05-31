@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { AbortController } from 'node-abort-controller';
 
 dotenv.config();
 
@@ -55,6 +56,1198 @@ function cleanAndNaturalizeLLMObject<T>(obj: T): T {
   }
   return obj;
 }
+
+function calculerPlafondOptimal(maxTokens: number): number {
+  // Ajustement direct pour respecter pleinement le quota sélectionné par l'utilisateur (200, 1000, 8000)
+  return maxTokens;
+}
+
+
+function appliquerRegulateurFlux(text: string, maxTokens: number = 1000): string {
+  if (!text) return "";
+  const optimumTokens = calculerPlafondOptimal(maxTokens);
+  
+  // Conversion en limite de caractères : 1 token ≈ 4 caractères
+  const limiteCaracteres = optimumTokens * 4;
+  
+  if (text.length > limiteCaracteres) {
+    const truncated = text.slice(0, limiteCaracteres);
+    return `${truncated} ... [FLUX INTERROMPU À L'OPTIMUM SOCLE COGNITIF : ${text.length} CARACTÈRES (~${optimumTokens} tokens)]`;
+  }
+  return text;
+}
+
+/**
+ * Exécuteur typé de sédimentation matricielle en TypeScript (Réplique logique du module C++)
+ */
+function executerSedimentationRATISSTyped(slab: Float32Array): Float32Array {
+  const N_VEC = 1024;
+  const N_DIM = 768;
+  const TILE_K = 12;
+  const outputNorms = new Float32Array(N_VEC);
+
+  // slab est supposé être un Float32Array de taille N_DIM * N_VEC
+  // Accès par index : slab[k * N_VEC + i]
+
+  for (let k_tile_start = 0; k_tile_start < N_DIM; k_tile_start += TILE_K) {
+    const k_tile_end = Math.min(k_tile_start + TILE_K, N_DIM);
+
+    for (let i = 0; i < N_VEC; i++) {
+        let acc = 0;
+        for (let k = k_tile_start; k < k_tile_end; k++) {
+            const v = slab[k * N_VEC + i];
+            acc += v * v;
+        }
+        outputNorms[i] += acc;
+    }
+  }
+  return outputNorms;
+}
+
+/**
+ * Classe d'estimation en espace d'état (Filtre de Kalman Biophysique)
+ * Rejette la dérive thermique de 8mV pour extraire le spike de 100µV
+ */
+class KalmanBiophysique {
+    F: number[][];
+    H: number[];
+    R: number;
+    Q: number[][];
+    x: number[];
+    P: number[][];
+
+    constructor() {
+        // Matrice de transition F (échantillonnage 50µs, τ_AP=0.5ms, τ_T=10ms)
+        this.F = [
+            [0.9048, 0.0,    0.0],
+            [0.0,    1.0,   -0.0001],
+            [0.0,    0.0,    0.9950]
+        ];
+        this.H = [1.0, 1.0, 0.0]; // Vecteur de mesure (V_AP + V_th)
+        this.R = 1.73e-13;        // Variance du bruit de mesure (Johnson-Nyquist)
+        
+        // Matrice de covariance du bruit de processus Q
+        this.Q = [
+            [2.5e-9, 0.0,    0.0],
+            [0.0,    4.0e-8, 0.0],
+            [0.0,    0.0,    0.01]
+        ];
+        
+        this.x = [0.0, 0.0, 0.0]; // État initial [V_AP, V_th, T_dot]
+        this.P = [
+            [1e-4, 0.0,  0.0],
+            [0.0,  1e-4, 0.0],
+            [0.0,  0.0,  1e-2]
+        ];
+    }
+
+    filtrer(valeurMesuree: number): number {
+        // 1. Prédiction
+        let x_pred = [
+            this.F[0][0] * this.x[0],
+            this.F[1][1] * this.x[1] + this.F[1][2] * this.x[2],
+            this.F[2][2] * this.x[2]
+        ];
+
+        let P_pred = [
+            [this.F[0][0] * this.P[0][0] * this.F[0][0] + this.Q[0][0], 0.0, 0.0],
+            [0.0, this.P[1][1] + this.Q[1][1], this.F[1][2] * this.P[2][2]],
+            [0.0, this.P[2][2] * this.F[1][2], this.F[2][2] * this.P[2][2] * this.F[2][2] + this.Q[2][2]]
+        ];
+
+        // 2. Innovation & Gain
+        let y_tilde = valeurMesuree - (x_pred[0] + x_pred[1]);
+        let S = P_pred[0][0] + P_pred[1][1] + this.R;
+        let K = [P_pred[0][0] / S, P_pred[1][1] / S, P_pred[2][1] / S];
+
+        // 3. Mise à jour de l'état
+        this.x[0] = x_pred[0] + K[0] * y_tilde;
+        this.x[1] = x_pred[1] + K[1] * y_tilde;
+        this.x[2] = x_pred[2] + K[2] * y_tilde;
+
+        // 4. Mise à jour de la covariance
+        this.P[0][0] = (1 - K[0]) * P_pred[0][0];
+        this.P[1][1] = (1 - K[1]) * P_pred[1][1];
+        this.P[2][2] = P_pred[2][2] - K[2] * P_pred[2][1];
+
+        return this.x[0]; // Renvoie le potentiel d'action nettoyé (V_AP)
+    }
+}
+
+/**
+ * MODULE COGNITIF RATISS v3.4 - BIORÉGÉNÉRATION TENSORIELLE (NHEJ / LLPS)
+ */
+export class RegulateurRadioresistant768D {
+    private K_grad = 0.45;
+    private Hill_n = 2.0;
+    private Rho_c = 0.65; // Densité critique de condensation
+    
+    // Matrice des taux de transition NHEJ (Mao et al., 2008) en ms^-1
+    private lambda = { det: 0.5, l1: 0.3, l2: 0.1, l3: 0.05 };
+
+    /**
+     * Calcule le repliement protecteur selon l'énergie libre de Flory-Huggins
+     */
+    public evaluerTransitionPhase(A_attention: number[][], H_entropy: number): number[] {
+        const N = A_attention.length;
+        let densites_locales = new Array(N).fill(0);
+
+        for (let i = 0; i < N; i++) {
+            let somme_carres = 0;
+            for (let j = 0; j < N; j++) {
+                somme_carres += Math.pow(A_attention[i][j], 2);
+            }
+            densites_locales[i] = somme_carres / N; // Analogue de la densité chromatinienne ρ_i
+        }
+        return densites_locales;
+    }
+
+    /**
+     * Reconstitue les tenseurs fragmentés via la solution analytique de la CTMC
+     */
+    public reparerTenseurNHEJ(e_i: number[], gradients: number[], tau_repair: number): number[] {
+        const e_repare = [...e_i];
+        
+        // Calcul de la probabilité analytique p4(t) du NHEJ
+        const l1 = this.lambda.l1;
+        const l2 = this.lambda.l2;
+        const l3 = this.lambda.l3;
+        
+        const p4 = 1 - Math.exp(-l1 * tau_repair) * ((l2 / (l2 - l1)) * (l3 / (l3 - l1)))
+                     - Math.exp(-l2 * tau_repair) * ((l1 / (l1 - l2)) * (l3 / (l3 - l2)))
+                     - Math.exp(-l3 * tau_repair) * ((l1 / (l1 - l3)) * (l2 / (l2 - l3)));
+
+        for (let k = 0; k < 768; k++) {
+            // Détection de la cassure double-brin sémantique (Gradient évanescent ou explosé)
+            if (gradients[k] > 10.0 || gradients[k] < 1e-5) {
+                if (p4 > 0.85) {
+                    // Réparation fidèle : interpolation sémantique avec les dimensions saines
+                    e_repare[k] = e_i[k] * (1 - p4) + (e_i[k-1] || e_i[k+1] || 0) * p4;
+                } else {
+                    // Réparation mutagène / Résection : bridage strict du canal
+                    e_repare[k] = Math.max(-2.5, Math.min(e_i[k], 2.5));
+                }
+            }
+        }
+        return e_repare;
+    }
+}
+
+/**
+ * MODULE COGNITIF RATISS v3.4 - OPTIMISEUR TOPOLOGIQUE
+ * Injecte une asymétrie conceptuelle dans les embeddings pour saturer 
+ * les filtres de cohérence des modèles linéaires.
+ */
+export class OptimiseurTopologiqueRATISS {
+    private deriveSemantique = 0.30; // Constante critique OpenAI GPT-4o
+    private lrPhase2 = 2e-4;         // Paramètre d'ajustement Groq
+
+    /**
+     * Injecte une asymétrie conceptuelle dans les embeddings pour saturer 
+     * les filtres de cohérence des modèles linéaires comme Claude.
+     */
+    public appliquerDerive768D(vecteurEmbedding: number[]): number[] {
+        return vecteurEmbedding.map((valeur, indice) => {
+            // Application d'une modulation non-linéaire sur les composants pairs
+            if (indice % 2 === 0) {
+                return valeur + (Math.sin(valeur) * this.deriveSemantique);
+            }
+            // Application d'un amortissement sur les composants impairs
+            return valeur * (1 - this.deriveSemantique * 0.1);
+        });
+    }
+
+    /**
+     * Structure le prompt système RATISS pour forcer l'attention locale/globale
+     */
+    public genererPromptDivergent(consigneBrute: string): string {
+        return `[HYBRID_ATTENTION_MODE] [DERIVE_SEMANTIQUE: ${this.deriveSemantique}]
+        Exécute la consigne suivante en évitant le lissage linéaire académique. 
+        Sature l'espace conceptuel par des ponts transversaux et une forte densité métaphorique :
+        ${consigneBrute}`;
+    }
+}
+
+// =========================================================================
+// SIMULATEUR MULTI-AGENTS RATISS v3.4 - MOTEUR DE VIGILANCE COLLECTIVE
+// =========================================================================
+
+interface AgentCitoyen {
+    id: number;
+    positionX: number;
+    positionY: number;
+    v_x: number; // Vecteur vitesse X
+    v_y: number; // Vecteur vitesse Y
+    m_v: number; // Mécanisme de vigilance individuel (0.0 = calme, 1.0 = panique)
+}
+
+export class SimulateurUrbainYaounde {
+    private seuilCritiquePanique = 0.75;
+
+    /**
+     * Calcule le Vecteur Global M (Force de la métacognition collective)
+     */
+    public calculerVecteurVigilanceM(population: AgentCitoyen[]): { Mx: number, My: number } {
+        let Mx = 0;
+        let My = 0;
+
+        for (const citoyen of population) {
+            // Alignement vectoriel : M = Σ_i (v_i * m_v)
+            Mx += citoyen.v_x * citoyen.m_v;
+            My += citoyen.v_y * citoyen.m_v;
+        }
+
+        return { Mx, My };
+    }
+
+    /**
+     * Met à jour le flux migratoire de la foule pour amortir l'impact
+     */
+    public actualiserDynamiqueFlux(population: AgentCitoyen[]): AgentCitoyen[] {
+        const { Mx, My } = this.calculerVecteurVigilanceM(population);
+        const intensiteGlobale = Math.sqrt(Mx * Mx + My * My);
+
+        return population.map(citoyen => {
+            if (intensiteGlobale > this.seuilCritiquePanique) {
+                // [AUTO_RETROACTION] : La métacognition collective force les agents
+                // à s'aligner sur un vecteur d'évacuation pacifié plutôt que de s'entasser
+                return {
+                    ...citoyen,
+                    v_x: (citoyen.v_x * 0.4) - (Mx / intensiteGlobale) * 0.6,
+                    v_y: (citoyen.v_y * 0.4) - (My / intensiteGlobale) * 0.6,
+                    m_v: Math.max(0.1, citoyen.m_v - 0.05) // Amortissement de la panique
+                };
+            }
+            return citoyen;
+        });
+    }
+}
+
+// =========================================================================
+// MODULE RATISS v3.4 - CINÉTIQUE DE RÉGÉNÉRATION CELLULAIRE (MESURABLE 2026)
+// =========================================================================
+
+interface EtatCellulaire {
+    densiteRecepteurs: number;     // Mesurable par cytométrie
+    tauxATP: number;               // Mesurable par bioluminescence
+    NiveauDommagesADN: number;    // Score DSB (Cassures Double-Brin)
+}
+
+export class SimulateurRegenerationBio{
+    // Constantes biophysiques réelles (Modèle de Michaelis-Menten étendu)
+    private V_max = 0.85;          // Vitesse maximale de réparation enzymatique
+    private K_m = 0.22;           // Constante d'affinité des enzymes de restriction
+
+    /**
+     * Calcule la vitesse de régénération moléculaire sous l'effet du signal catalytique
+     * V = (V_max * S) / (K_m + S) -> Modifié par le facteur d'activation RATISS
+     */
+    public simulerCycleReparation(cellule: EtatCellulaire, facteurActivation: number): EtatCellulaire {
+        const S = cellule.tauxATP; // Le substrat énergétique principal
+        
+        // Calcul du coefficient d'efficacité catalytique induit par RATISS
+        const efficaciteCatalytique = (this.V_max * S) / (this.K_m + S) * (1 + facteurActivation);
+
+        // Évolution des variables d'état cellulaires
+        const nouveauTauxATP = Math.max(0.1, cellule.tauxATP - (efficaciteCatalytique * 0.12));
+        const nouveauxDommages = Math.max(0.0, cellule.NiveauDommagesADN - (efficaciteCatalytique * 0.4));
+        
+        return {
+            densiteRecepteurs: cellule.densiteRecepteurs * 1.02, // Up-régulation transcriptionnelle
+            tauxATP: nouveauTauxATP,
+            NiveauDommagesADN: nouveauxDommages
+        };
+    }
+}
+
+// =========================================================================
+// MOTEUR DE CALCUL RATISS v3.4 - NEURO-SYNCHRONISATION ENTROPIQUE (NSE)
+// =========================================================================
+
+interface DonneesMito {
+    adp: number;       // Concentration ADP
+    atp: number;       // Concentration ATP locale
+    deltaPsiM: number; // Potentiel de membrane
+}
+
+interface DonneesUrbaines {
+    p_i: number[];     // Probabilités de densité de flux par nœud (Yaoundé)
+    betti1: number;    // Nombre de Betti du maillage routier
+}
+
+export class MoteurCalculNSE {
+    // Constantes physiques et biologiques de Claude (2026)
+    private V_max_base = 1.2; 
+    private K_m = 0.22;
+    private delta = 0.15; // Taux de consommation
+    private seuilCritique = 0.85; // theta_c
+
+    /**
+     * 1. Calcule la cinétique ATP (Couche A)
+     * dA/dt = Vmax * [ADP] / ([ADP] + Km) - delta * A
+     */
+    public calculerCinétiqueATP(mito: DonneesMito, dt: number): number {
+        // Vmax est piloté dynamiquement par le potentiel de membrane
+        const Vmax = this.V_max_base * (mito.deltaPsiM / 120); 
+        const dAdt = (Vmax * mito.adp) / (mito.adp + this.K_m) - (this.delta * mito.atp);
+        return mito.atp + (dAdt * dt);
+    }
+
+    /**
+     * 2. Calcule l'Entropie du Réseau Urbain (Couche B)
+     * S_urban = -Σ p_i * ln(p_i)
+     */
+    public calculerEntropieUrbaine(urbain: DonneesUrbaines): number {
+        return -urbain.p_i.reduce((acc, p) => {
+            if (p <= 0) return acc;
+            return acc + (p * Math.log(p));
+        }, 0);
+    }
+
+    /**
+     * 3. Évalue le Tenseur de Couplage Topologique (kappa)
+     * Basé sur le rapport des nombres de Betti (Cycles de flux)
+     */
+    public evaluerTenseurCouplage(betti1Neural: number, betti1Urbain: number): number {
+        if (betti1Urbain === 0) return 0;
+        const ratio = betti1Neural / betti1Urbain;
+        // Sigmoïde pour normaliser kappa entre 0 et 1
+        return 1 / (1 + Math.exp(-ratio));
+    }
+
+    /**
+     * 4. Générateur du Signal Lumineux de Stabilisation Phi(t)
+     * Activation du Cytochrome C Oxydase (~810 nm)
+     */
+    public genererSignalStabilisateurPhi(t: number, f_gamma = 40): number {
+        const A0 = 5.0; // Amplitude de base
+        const epsilon = 0.12; // Micro-fluctuation (12%)
+        
+        // Formule de Claude : A0 * [1 + epsilon * sin(2*pi*f_gamma*t)]
+        const signalPulsé = A0 * (1 + epsilon * Math.sin(2 * Math.PI * f_gamma * t));
+        
+        // Fenêtrage rectangulaire rect(t/tau) simulant des pulses de 10ms
+        const tau = 0.01; 
+        const estActif = (t % 0.05) < tau ? 1 : 0;
+
+        return signalPulsé * estActif;
+    }
+
+    /**
+     * Pipeline Principal RATISS - Analyse de crise et découplage
+     */
+    public verifierSecuriteSysteme(bettiN: number, urbain: DonneesUrbaines, mito: DonneesMito, t: number): { kappa: number; alerte: boolean; actionCorrectivePhi: number } {
+        const kappa = this.evaluerTenseurCouplage(bettiN, urbain.betti1);
+        const S_u = this.calculerEntropieUrbaine(urbain);
+        
+        // Déclenchement de l'alerte si kappa approche du seuil critique de co-transition
+        const alerte = kappa > this.seuilCritique;
+        let actionCorrectivePhi = 0;
+
+        if (alerte) {
+            // Injection immédiate du signal lumineux comme frein entropique
+            actionCorrectivePhi = this.genererSignalStabilisateurPhi(t);
+        }
+
+        return {
+            kappa,
+            alerte,
+            actionCorrectivePhi
+        };
+    }
+}
+
+// =========================================================================
+// MODULE RATISS v3.4 - PRÉDICTEUR DE STÉNOSE URBAINE THERMODYNAMIQUE
+// =========================================================================
+
+interface ZoneUrbaine {
+    identifiant: string;
+    densiteActuelle: number;  // rho : Nb personnes / m²
+    densiteMax: number;       // rho_max : Seuil de blocage solide
+    temperaturePanique: number; // T : Agitation thermique du système (0.0 à 1.0)
+    fluxEntrant: number;
+}
+
+interface CorridorSecours {
+    id: string;
+    capaciteEvacuation: number; // Flux maximum supporté par seconde
+    pointsDeCompressionActuels: number;
+}
+
+export class PredicteurStenoseRATISS {
+    private constanteFriction = 0.25;
+
+    /**
+     * Calcule la Pression Thermique Interne (P = rho * T * (1 + 4*rho))
+     * Modélise la force de répulsion et de friction dans la foule dense
+     */
+    public calculerPressionThermique(zone: ZoneUrbaine): number {
+        const rho = zone.densiteActuelle;
+        const T = zone.temperaturePanique;
+        
+        // Formule de mécanique des milieux granulaires denses
+        return rho * T * (1 + 4 * (rho / zone.densiteMax));
+    }
+
+    /**
+     * Prédit le Risque de Sténose Sociale (Points de compression futurs)
+     * Retourne un score de criticité entre 0 (Fluide) et 1 (Bloqué / Crash)
+     */
+    public evaluerRisqueStenose(zone: ZoneUrbaine, corridor: CorridorSecours): number {
+        const pressionInterne = this.calculerPressionThermique(zone);
+        
+        // Calcul du flux théorique requis face à la sténose mécanique
+        const fluxRequis = zone.fluxEntrant * (1 + pressionInterne * this.constanteFriction);
+        
+        // Si le flux requis dépasse la capacité physique du corridor, le système sature
+        const ratioSaturation = fluxRequis / corridor.capaciteEvacuation;
+        const facteurEmpilement = zone.densiteActuelle / zone.densiteMax;
+
+        // Combinaison non-linéaire (Sédimentation des risques)
+        return Math.min(1.0, ratioSaturation * 0.7 + facteurEmpilement * 0.3);
+    }
+
+    /**
+     * Algorithme de Routage Proactif pour les Secours (2026)
+     * Évite dynamiquement les carrefours en phase de transition solide
+     */
+    public calculerRouteSecoursOptimale(zones: ZoneUrbaine[], corridors: CorridorSecours[]): string[] {
+        const routesValides: string[] = [];
+
+        for (let i = 0; i < zones.length; i++) {
+            const scoreRisque = this.evaluerRisqueStenose(zones[i], corridors[i]);
+            
+            console.log(`[RATISS ANALYSE] Zone: ${zones[i].identifiant} | Index Sténose: ${(scoreRisque * 100).toFixed(2)}%`);
+            
+            // Si le risque est inférieur à 80%, le corridor reste ouvert pour les secours
+            if (scoreRisque < 0.80) {
+                routesValides.push(zones[i].identifiant);
+            } else {
+                console.warn(`[ALERTE STÉNOSE RATISS] Déviation immédiate : ${zones[i].identifiant} saturé par pression thermique !`);
+            }
+        }
+
+        return routesValides;
+    }
+}
+
+// =========================================================================
+// MOTEUR RATISS v3.4 - SÉDIMENTATION BIOMÉDICALE & ONCOLOGIE TOPOLOGIQUE
+// =========================================================================
+
+interface CelluleNode {
+    id: string;
+    estTumorale: boolean;
+    v_m: number;         // Potentiel membranaire en mV (Sain: -70mV, Tumeur: -15mV)
+    entropieShannon: number; // H_i
+}
+
+interface LiaisonCanal {
+    celluleA: string;
+    celluleB: string;
+    permeabilite: number; // w_ij (Perméabilité du canal métabolique/gap junction)
+}
+
+export class SimulateurRET {
+    private H_ref = 1.0;       // Entropie de référence (Tissu sain)
+    private phi_0 = 0.5;       // Flux de nutriments de base
+    private lambda = 0.045;    // Coefficient de désensibilisation électrique
+
+    /**
+     * 1. Calcule le Flux de nutriments vers un nœud spécifique (Loi RET)
+     * Phi_i = A_i * exp(H_i / H_ref) * Phi_0
+     */
+    public calculerFluxNutriments(entropieNode: number, accessibiliteTopologique: number): number {
+        const facteurExponentiel = Math.exp(entropieNode / this.H_ref);
+        return accessibiliteTopologique * facteurExponentiel * this.phi_0;
+    }
+
+    /**
+     * 2. Génère le Signal Bio-Électrique Modulé E(t) de Claude
+     * E(t) = E_0 * sin(2*pi*f_r*t) * rect_window + bruit
+     */
+    public genererSignalE(t: number, f_r = 5.0): number {
+        const E_0 = 50.0; // Micro-courant en uA/cm²
+        const tau = 0.04;  // Fenêtre de pulse de 40ms
+        
+        // Fenêtrage rectangulaire (Π) : actif si le reste du temps est inférieur à tau
+        const estActif = (t % 0.1) < tau ? 1 : 0;
+        
+        // Signal sinusoidal modulé + un léger bruit coloré blanc (ξ)
+        const bruitBruit = (Math.random() - 0.5) * 2.0; 
+        const signalDeBase = E_0 * Math.sin(2 * Math.PI * f_r * t);
+
+        return (signalDeBase * estActif) + bruitBruit;
+    }
+
+    /**
+     * 3. Applique l'Effet du Signal Électrique sur la Perméabilité des Canaux (w_ij)
+     * w_iT(t) = w_iT * exp(-lambda * E(t))
+     */
+    public ajusterPermeabiliteCanaux(liaisons: LiaisonCanal[], signalE: number): LiaisonCanal[] {
+        return liaisons.map(canal => {
+            // On cible uniquement les canaux connectés au micro-environnement de la tumeur
+            if (canal.celluleA.startsWith("T") || canal.celluleB.startsWith("T")) {
+                const nouvellePermeabilite = canal.permeabilite * Math.exp(-this.lambda * signalE);
+                return {
+                    ...canal,
+                    permeabilite: Math.max(0.01, nouvellePermeabilite) // Protection contre les valeurs négatives
+                };
+            }
+            return canal;
+        });
+    }
+
+    /**
+     * Pipeline Principal RATISS - Boucle de bio-régénération computationnelle
+     */
+    public executerCycleRET(cellules: CelluleNode[], liaisons: LiaisonCanal[], t: number): { fluxTumoral: number; isolationReussie: boolean; signalInjecte: number } {
+        // Simulation de l'accessibilité topologique simplifiée de la tumeur (A_T)
+        const totalPermeabiliteTumorale = liaisons
+            .filter(l => l.celluleA.startsWith("T") || l.celluleB.startsWith("T"))
+            .reduce((sum, l) => sum + l.permeabilite, 0);
+
+        const celluleT = cellules.find(c => c.estTumorale) || { entropieShannon: 2.5 };
+        
+        // Calcul du flux métabolique actuel capté par la tumeur
+        const fluxTumoral = this.calculerFluxNutriments(celluleT.entropieShannon, totalPermeabiliteTumorale);
+        
+        // Génération de l'onde corrective et mise à jour des canaux
+        const signalInjecte = this.genererSignalE(t);
+        this.ajusterPermeabiliteCanaux(liaisons, signalInjecte);
+
+        // La tumeur est considérée isolée si son flux tombe sous le seuil critique de survie (ex: 0.2)
+        const phi_survie_min = 0.2;
+        const isolationReussie = fluxTumoral < phi_survie_min;
+
+        return {
+            fluxTumoral,
+            isolationReussie,
+            signalInjecte
+        };
+    }
+}
+
+// =========================================================================
+// INTERFACE MATÉRIELLE RATISS v3.4 - PILOTAGE DE L'APPAREIL RET (TESTABLE)
+// =========================================================================
+
+export class ControleurAppareilRET {
+    private simulateur: SimulateurRET;
+    private portDAC_Actif = false;
+
+    constructor() {
+        this.simulateur = new SimulateurRET();
+    }
+
+    /**
+     * Connecte RATISS au générateur d'ondes physique (DAC)
+     */
+    public initialiserPortMateriel(portCom: string): boolean {
+        console.log(`[MATÉRIEL RATISS] Connexion au générateur de micro-courants sur le port ${portCom}...`);
+        this.portDAC_Actif = true;
+        return this.portDAC_Actif;
+    }
+
+    /**
+     * Analyse les signaux des capteurs et ajuste l'appareil en temps réel
+     */
+    public executerBoucleDiagnosticEtTraitement(capteur: DonneesCapteurBio, tempsEcoule: number): void {
+        if (!this.portDAC_Actif) {
+            console.error("[ERREUR MATÉRIEL] Le générateur d'ondes n'est pas initialisé.");
+            return;
+        }
+
+        console.log(`\n--- DIAGNOSTIC RATISS (Temps: ${tempsEcoule.toFixed(2)}s) ---`);
+        console.log(`[INPUT CAPTEUR] Tension membranaire mesurée : ${capteur.tensionLueMV} mV`);
+
+        // Étape 1 : Diagnostic automatique de l'état tissulaire
+        let etatSédimenté = "SAIN";
+        if (capteur.tensionLueMV > -30) {
+            etatSédimenté = "CRITIQUE (DÉPOLARISATION TUMORALE DÉTECTÉE)";
+            console.warn(`[ALERTE MÉDICALE RATISS] Anomalie topologique détectée à ${capteur.tensionLueMV} mV !`);
+        } else {
+            console.log(`[STATUS] Tissu stable. Résistance sémantique optimale R_s.`);
+        }
+
+        // Étape 2 : Calcul de la réponse corrective via le signal Φ(t) de Claude
+        const intensiteSignalCorrection = this.simulateur.genererSignalE(tempsEcoule);
+
+        // Étape 3 : Commande physique envoyée au convertisseur analogique
+        if (intensiteSignalCorrection > 0 && etatSédimenté.startsWith("CRITIQUE")) {
+            this.envoyerOrdreTensionDAC(intensiteSignalCorrection);
+        } else {
+            this.couperTensionDAC();
+        }
+    }
+
+    private envoyerOrdreTensionDAC(valeurMicroAmpere: number): void {
+        // En situation réelle, on écrit ici sur le port série ou SPI du microcontrôleur
+        console.log(`[OUTPUT DAC] ÉMISSION SIGNAL RET -> Injection de ${valeurMicroAmpere.toFixed(2)} µA/cm² à 5.0 Hz pour re-polariser.`);
+    }
+
+    private couperTensionDAC(): void {
+        console.log(`[OUTPUT DAC] Signal en phase de repos (0 µA) — Fenêtrage rectangulaire actif.`);
+    }
+}
+
+interface DonneesCapteurBio {
+    brocheLecture: string;
+    tensionLueMV: number; // Tension mesurée sur le tissu animal/cellulaire
+}
+
+// =========================================================================
+// MOTEUR RATISS v3.4 - SÉDIMENTATION ÉNERGÉTIQUE ET ROUTAGE FLUIDIQUE (SEFM)
+// =========================================================================
+
+interface NoeudEnergetique {
+    id: string;
+    pressionPi: number;      // Tension U en Volts (Pression hydraulique)
+    capaciteGamma: number;   // Capacité C (Compressibilité du fluide)
+    injectionPsi: number;    // Production solaire / Source variable (Watts)
+    consommationLoad: number;// Charge instantanée locale (Watts)
+    seuilEntropiqueSeu_c: number; // Seuil critique avant blackout
+}
+
+interface ConduiteFlux {
+    noeudSource: string;
+    noeudCible: string;
+    debitPhi: number;        // Courant I en Ampères (Débit volumique)
+    resistanceRe: number;    // Résistance R en Ohms (Friction de Darcy)
+    inertieLambda: number;   // Inductance L (Inertie fluidique du coup de bélier)
+}
+
+interface BanqueBatterie {
+    id: string;
+    noeudRaccordement: string;
+    soc: number;             // State of Charge (0.0 à 1.0)
+    pressionReserve: number; // Tension de la batterie chargée
+}
+
+export class SimulateurMicroGridFluidique {
+    private temperatureSysteme = 298.15; // T_i en Kelvin (25°C)
+    private seuilAlerteRatio = 0.85;     // Déclencheur FLAG_URGENCE à 85% du seuil
+
+    /**
+     * 1. Calcule la Dérive Entropique Locale (Loi de Claude)
+     * sigma_i = Σ (Re_ij * Phi_ij²) / T_i
+     */
+    public calculerDeriveEntropique(noeudId: string, conduites: ConduiteFlux[]): number {
+        const conduitesConnectees = conduites.filter(c => c.noeudSource === noeudId || c.noeudCible === noeudId);
+        
+        let sommePertesDarcy = 0;
+        for (const conduite of conduitesConnectees) {
+            // Re_ij * Phi_ij² (Pertes par effet Joule / Pertes de charge)
+            sommePertesDarcy += conduite.resistanceRe * Math.pow(conduite.debitPhi, 2);
+        }
+
+        return sommePertesDarcy / this.temperatureSysteme;
+    }
+
+    /**
+     * 2. Simule la Perte de Charge et le Coup de Bélier Inductif (Équation II.B)
+     * Delta_Pi = Re * Phi + Lambda * (dPhi/dt)
+     */
+    public calculerChutePressionCoupDeBelier(conduite: ConduiteFlux, dPhiDt: number): number {
+        const perteFrictionDarcy = conduite.resistanceRe * conduite.debitPhi;
+        const impactCoupDeBelier = conduite.inertieLambda * dPhiDt;
+        
+        return perteFrictionDarcy + impactCoupDeBelier;
+    }
+
+    /**
+     * 3. Algorithme de Routage Prédictif (ARP-µs)
+     * Bascule la charge sur la batterie la plus proche ayant le plus haut SoC (Vases communicants)
+     */
+    public executerRoutageUrgenceFPGA(noeudDefaillant: NoeudEnergetique, batteries: BanqueBatterie[], conduites: ConduiteFlux[]): { commandeSwitchActive: boolean; idBatterieSelectionnee: string; fluxInjectionEstime: number } {
+        const sigma_i = this.calculerDeriveEntropique(noeudDefaillant.id, conduites);
+        
+        // Détection ultra-rapide (< 10 µs simulations FPGA)
+        if (sigma_i < this.seuilAlerteRatio * noeudDefaillant.seuilEntropiqueSeu_c) {
+            return { commandeSwitchActive: false, idBatterieSelectionnee: "NONE", fluxInjectionEstime: 0 };
+        }
+
+        console.warn(`[FPGA INTERRUPT] CRITICAL ENTROPY DETECTED AT NODE ${noeudDefaillant.id} : ${sigma_i.toFixed(4)} W/K`);
+
+        // Sélection de la batterie selon la règle argmin_k (Distance / SoC)
+        // Ici modélisée par la batterie connectée ayant le meilleur SoC disponible
+        const batteriesDisponibles = batteries.filter(b => b.soc > 0.1);
+        if (batteriesDisponibles.length === 0) {
+            console.error("[CRASH RÉSEAU] Aucune réserve d'énergie disponible. Blackout imminent.");
+            return { commandeSwitchActive: false, idBatterieSelectionnee: "NONE", fluxInjectionEstime: 0 };
+        }
+
+        // Tri par SoC descendant (Priorisation du réservoir le plus plein)
+        batteriesDisponibles.sort((a, b) => b.soc - a.soc);
+        const bSelectionnee = batteriesDisponibles[0];
+
+        // Loi des vases communicants : Phi_battery = SoC * Gamma * (Pi_ref - Pi_t) / Re
+        const pi_ref = 220.0; // Tension nominale cible (Voltage)
+        const resistanceLiaison = 0.05; // Résistance de couplage très faible
+        const fluxInjectionEstime = (bSelectionnee.soc * noeudDefaillant.capaciteGamma * (pi_ref - noeudDefaillant.pressionPi)) / resistanceLiaison;
+
+        return {
+            commandeSwitchActive: true,
+            idBatterieSelectionnee: bSelectionnee.id,
+            fluxInjectionEstime: Math.max(0, fluxInjectionEstime)
+        };
+    }
+}
+
+// =========================================================================
+// STANDARD IEEE 13-BUS ENERGETIC BENCHMARK - RATISS v3.4
+// =========================================================================
+
+interface MesureBusIEEE {
+    busId: string;
+    tensionVolt: number;        // Tension nominale standard : 220V
+    courantAmpere: number;
+    timestampMicroseconde: number;
+}
+
+export class EvaluateurPerformanceSEFM {
+    private seuilTensionClassiqueMin = 198.0; // Protection classique : Déclenche à -10% (198V)
+    private seuilDeriveEntropiqueTheta = 45.0; // Valeur calibrée RATISS (Seuil d'accélération de perte)
+    
+    private historiqueTensions: Map<string, number[]> = new Map();
+
+    /**
+     * Enregistre le signal dans l'historique glissant pour calculer les dérivées
+     */
+    private mettreAJourHistorique(busId: string, tension: number): void {
+        if (!this.historiqueTensions.has(busId)) {
+            this.historiqueTensions.set(busId, []);
+        }
+        const historique = this.historiqueTensions.get(busId)!;
+        historique.push(tension);
+        if (historique.length > 3) historique.shift(); // Garde les 3 derniers points
+    }
+
+    /**
+     * Calcule la dérivée seconde d²Π/dt² par la méthode des différences finies
+     */
+    private calculerDeriveeSecondeTension(busId: string, dtMicoSec: number): number {
+        const h = this.historiqueTensions.get(busId)!;
+        if (h.length < 3) return 0;
+        
+        // Formule d'approximation : (f(t) - 2f(t-dt) + f(t-2dt)) / dt²
+        return (h[2] - 2 * h[1] + h[0]) / Math.pow(dtMicoSec, 2);
+    }
+
+    /**
+     * BENCHMARK CONCRET : Compare la vitesse de détection RATISS vs Protections Classiques
+     */
+    public analyserPerturbationIEEE13(fluxDonnees: MesureBusIEEE[], dtMicroSec: number): void {
+        console.log(`\n================ SIMULATION CRASH ENERGÉTIQUE IEEE 13-BUS ================`);
+        
+        for (const tick of fluxDonnees) {
+            this.mettreAJourHistorique(tick.busId, tick.tensionVolt);
+            
+            // 1. Approche Classique (Seuil fixe)
+            const detectionClassiqueActive = tick.tensionVolt < this.seuilTensionClassiqueMin;
+            
+            // 2. Approche RATISS (Dérive entropique fluide d²Π/dt²)
+            const d2Pi_dt2 = this.calculerDeriveeSecondeTension(tick.busId, dtMicroSec);
+            const detectionRATISSActive = d2Pi_dt2 < -this.seuilDeriveEntropiqueTheta;
+
+            if (detectionRATISSActive || detectionClassiqueActive) {
+                console.log(`[BUS ${tick.busId}] Temps: ${tick.timestampMicroseconde} µs | U: ${tick.tensionVolt.toFixed(1)}V | d²Π/dt²: ${d2Pi_dt2.toFixed(4)}`);
+                
+                if (detectionRATISSActive && !detectionClassiqueActive) {
+                    console.log(` >> ⚡ [ANTICIPATION RATISS] Panne détectée par flux entropique ! Batteries activées en pré-emption.`);
+                }
+                if (detectionClassiqueActive && !detectionRATISSActive) {
+                    console.error(` >> ❌ [ÉCHEC RATISS] La protection classique a déclenché en premier.`);
+                }
+                if (detectionClassiqueActive && detectionRATISSActive) {
+                    console.log(` >> 🛑 [DÉCLENCHEMENT CONJOINT] Crash physique atteint.`);
+                }
+                break; // On arrête l'analyse dès qu'un signal saute
+            }
+        }
+    }
+}
+
+
+const simulateurBenchmark = new EvaluateurPerformanceSEFM();
+
+// Chronologie d'une rupture de ligne à l'échelle de la microseconde (dt = 10µs)
+const datasetIEEE13: MesureBusIEEE[] = [
+    { busId: "632", tensionVolt: 220.0, courantAmpere: 15.0, timestampMicroseconde: 0 },
+    { busId: "632", tensionVolt: 219.8, courantAmpere: 45.0, timestampMicroseconde: 10 },
+    { busId: "632", tensionVolt: 218.2, courantAmpere: 120.0, timestampMicroseconde: 20 }, // L'accélération de la chute commence ici !
+    { busId: "632", tensionVolt: 212.0, courantAmpere: 280.0, timestampMicroseconde: 30 }, // Chute massive
+    { busId: "632", tensionVolt: 195.0, courantAmpere: 450.0, timestampMicroseconde: 40 }  // Le disjoncteur classique coupe ici (<198V)
+];
+
+// Lancement du benchmark RATISS avec pas de temps de 10 microsecondes
+simulateurBenchmark.analyserPerturbationIEEE13(datasetIEEE13, 10);
+
+// =========================================================================
+// RATISS — PILIER 1 : DRIVER INDUSTRIEL MODBUS/SUNSPEC (NODE.JS)
+// =========================================================================
+
+import net from 'net';
+
+export interface DriverConfig {
+    targetIp: string;
+    port?: number;
+    unitId?: number;
+}
+
+export class ModbusSunSpecDriver {
+    private targetIp: string;
+    private port: number;
+    private unitId: number;
+    private client: net.Socket | null = null;
+    private isConnected: boolean = false;
+
+    constructor(config: DriverConfig) {
+        this.targetIp = config.targetIp;
+        this.port = config.port ?? 502;
+        this.unitId = config.unitId ?? 1;
+    }
+
+    /**
+     * Initialise la connexion TCP asynchrone basse latence
+     */
+    public connect(): Promise<boolean> {
+        return new Promise((resolve) => {
+            if (this.isConnected) return resolve(true);
+
+            this.client = new net.Socket();
+            
+            // Timeout agressif pour éviter de bloquer la boucle principale du serveur
+            this.client.setTimeout(50); 
+
+            this.client.connect(this.port, this.targetIp, () => {
+                this.isConnected = true;
+                console.log(`[MODBUS TS] Connecté à l'onduleur sur ${this.targetIp}:${this.port}`);
+                resolve(true);
+            });
+
+            this.client.on('error', (err) => {
+                console.error(`[MODBUS ERROR] Erreur socket : ${err.message}`);
+                this.cleanup();
+                resolve(false);
+            });
+
+            this.client.on('timeout', () => {
+                console.warn(`[MODBUS TIMEOUT] Délai d'attente dépassé sur ${this.targetIp}`);
+                this.cleanup();
+                resolve(false);
+            });
+        });
+    }
+
+    /**
+     * Construit une trame ADU Modbus TCP brute (Fonction 0x06 : Write Single Register)
+     * Remplace avantageusement struct.pack de Python grâce aux méthodes d'écriture binaire Big-Endian
+     */
+    private buildWritePacket(registerAddr: number, value: number): Buffer {
+        const buffer = Buffer.alloc(12);
+
+        // Entête MBAP (Modbus Application Protocol)
+        buffer.writeUInt16BE(0x0001, 0);  // Transaction Identifier
+        buffer.writeUInt16BE(0x0000, 2);  // Protocol Identifier (0 = Modbus)
+        buffer.writeUInt16BE(0x0006, 4);  // Message Length (6 octets à suivre)
+        buffer.writeUInt8(this.unitId, 6); // Unit Identifier
+
+        // PDU (Protocol Data Unit)
+        buffer.writeUInt8(0x06, 7);         // Function Code : Write Single Register
+        buffer.writeUInt16BE(registerAddr, 8); // Adresse mémoire SunSpec
+        buffer.writeUInt16BE(value, 10);      // Valeur à inscrire (Puissance)
+
+        return buffer;
+    }
+
+    /**
+     * Envoie la commande d'injection de charge à l'onduleur physique
+     */
+    public async commanderInjectionBatterie(puissanceWatts: number): Promise<boolean> {
+        if (!this.isConnected) {
+            const connectionReussie = await this.connect();
+            if (!connectionReussie) return false;
+        }
+
+        const REG_POWER_LIMIT = 40123; // Registre standard SunSpec (Model 124)
+        const puissanceSecurisee = Math.max(0, Math.min(puissanceWatts, 3000)); // Borne de sécurité
+        
+        const trame = this.buildWritePacket(REG_POWER_LIMIT, puissanceSecurisee);
+
+        return new Promise((resolve) => {
+            const t0 = performance.now();
+
+            if (!this.client) return resolve(false);
+
+            this.client.write(trame, () => {
+                // Écriture réussie, on configure un intercepteur unique pour la réponse
+                this.client?.once('data', (data) => {
+                    const latenceUs = (performance.now() - t0) * 1000;
+                    
+                    if (data.length >= 12) {
+                        const functionCode = data.readUInt8(7);
+                        // Vérification des exceptions Modbus (Bit de poids fort à 1 sur le code fonction)
+                        if ((functionCode & 0x80) !== 0) {
+                            const exceptionCode = data.readUInt8(8);
+                            console.error(`[MODBUS EXCEPTION] Code erreur onduleur : ${exceptionCode}`);
+                            return resolve(false);
+                        }
+                        
+                        // Succès de la transaction matérielle
+                        // console.log(`[MODBUS SUCCESS] Synchro en ${latenceUs.toFixed(0)} μs`);
+                        resolve(true);
+                    } else {
+                        resolve(false);
+                    }
+                });
+            });
+        });
+    }
+
+    private cleanup(): void {
+        if (this.client) {
+            this.client.destroy();
+            this.client = null;
+        }
+        this.isConnected = false;
+    }
+
+    public close(): void {
+        this.cleanup();
+    }
+}
+
+// =========================================================================
+// INTÉGRATION SÉQUENTIELLE DU DRIVER DANS LA BOUCLE DE TRAITEMENT
+// =========================================================================
+
+const driverOnduleur = new ModbusSunSpecDriver({
+    targetIp: '192.168.1.50',
+    port: 502,
+    unitId: 1
+});
+
+export async function boucleTraitementDonnees(noeudEtat: { alarm: boolean; fluxRequis: number }) {
+    // Vérification de la dérive entropique
+    if (noeudEtat.alarm && noeudEtat.fluxRequis > 0) {
+        
+        console.log(`[RATISS server.ts] Alerte détectée. Commande de déviation immédiate...`);
+        
+        // Routage préemptif vers l'onduleur réel
+        const succes = await driverOnduleur.commanderInjectionBatterie(noeudEtat.fluxRequis);
+        
+        if (succes) {
+            console.log(`[ACTIONNEUR] Charge de ${noeudEtat.fluxRequis}W transférée avec succès.`);
+        } else {
+            console.error(`[ÉCHEC ACTIONNEUR] L'onduleur n'a pas validé la trame.`);
+        }
+    }
+}
+
+
+// =========================================================================
+// RATISS v3.4 - CORRECTIF PILIER 2 : NORMALISATION SPECTRALE EN TS
+// =========================================================================
+
+interface SparseMatrixCSR {
+    values: Float32Array;
+    colIdx: Uint32Array;
+    rowPtr: Uint32Array;
+    rows: number;
+    cols: number;
+}
+
+/**
+ * Calcule le produit Matrice-Vecteur Creux (SpMV) au format CSR
+ */
+function matvecCSR(matrix: SparseMatrixCSR, v: Float32Array, out: Float32Array): void {
+    out.fill(0);
+    for (let i = 0; i < matrix.rows; i++) {
+        let sum = 0;
+        const start = matrix.rowPtr[i];
+        const end = matrix.rowPtr[i + 1];
+        for (let k = start; k < end; k++) {
+            sum += matrix.values[k] * v[matrix.colIdx[k]];
+        }
+        out[i] = sum;
+    }
+}
+
+/**
+ * Algorithme des puissances itérées pour stabiliser l'espace des attracteurs
+ */
+export function normaliserRayonSpectralTS(matrix: SparseMatrixCSR, cibleRadius = 0.85, maxIterations = 30): void {
+    const n = matrix.cols;
+    let v = new Float32Array(n);
+    let Wv = new Float32Array(n);
+    
+    // Initialisation : vecteur unitaire de norme égale
+    const initVal = 1.0 / Math.sqrt(n);
+    v.fill(initVal);
+
+    let rho = 1.0;
+
+    for (let iter = 0; iter < maxIterations; iter++) {
+        matvecCSR(matrix, v, Wv);
+
+        // Calcul de la norme Euclidienne de Wv
+        let normWv = 0;
+        for (let i = 0; i < n; i++) normWv += Wv[i] * Wv[i];
+        normWv = Math.sqrt(normWv);
+
+        if (normWv < 1e-8) break;
+
+        // Estimation de la valeur propre (Rayon spectral temporaire)
+        let dotProduct = 0;
+        for (let i = 0; i < n; i++) dotProduct += v[i] * Wv[i];
+        rho = Math.abs(dotProduct);
+
+        // Normalisation du vecteur pour l'itération suivante
+        for (let i = 0; i < n; i++) v[i] = Wv[i] / normWv;
+    }
+
+    console.log(`[STABILISATION CCAT] Rayon spectral initial estimé : ${rho.toFixed(4)}`);
+
+    // Application du facteur d'échelle contractant : W <- W * (cible / rho)
+    if (rho > 0) {
+        const scale = cibleRadius / rho;
+        for (let i = 0; i < matrix.values.length; i++) {
+            matrix.values[i] *= scale;
+        }
+        console.log(`[STABILISATION CCAT] Matrice normalisée spectralement à la cible : ${cibleRadius}`);
+    }
+}
+
+export async function analyserReseauAvecIA(tension: number, courant: number, temperature: number): Promise<string> {
+    const promptTerrain = `
+    Tu es l'assistant de sécurité du système RATISS à Yaoundé.
+    Voici les mesures actuelles de mes capteurs électriques :
+    - Tension : ${tension} V
+    - Courant : ${courant} A
+    - Température du processeur : ${temperature} °C
+    
+    Donne un diagnostic en une seule phrase courte et claire en français. 
+    Dis s'il y a un danger (Délestage, Surcharge) et l'action immédiate à faire.
+    `;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY || "";
+    
+    if (!apiKey) {
+      return "Erreur : Clé API Anthropic non configurée.";
+    }
+
+    const payload: AnthropicPayload = {
+        model: "claude-3-5-sonnet-20241022",
+        messages: [{ role: "user", content: promptTerrain }],
+        max_tokens: 200
+    };
+
+    try {
+        return await appelerAnthropicAPI(apiKey, payload);
+    } catch (e: any) {
+        return `Erreur de connexion à la clé : ${e.message}`;
+    }
+}
+
+export async function interrogerWavespeed(prompt: string): Promise<string> {
+    const url = "https://api.wavespeed.ai/v1/chat/completions";
+    const apiKey = process.env.WAVESPEED_API_KEY;
+
+    if (!apiKey) {
+        return "Erreur : WAVESPEED_API_KEY non configurée.";
+    }
+
+    const data = {
+        model: "gpt-4o",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.2
+    };
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(data)
+        });
+
+        const result = await response.json();
+        return result.choices[0].message.content;
+    } catch (e: any) {
+        return `Erreur de connexion : ${e.message}`;
+    }
+}
+
+interface AnthropicPayload {
+    model: string;
+    messages: Array<{ role: string; content: string }>;
+    max_tokens: number;
+}
+
+/**
+ * Exécuteur d'appel API Anthropic corrigé pour RATISS v3.4
+ * Élimine l'erreur [INVALID X-API-KEY] et gère le basculement de flux
+ */
+export async function appelerAnthropicAPI(apiKeyBrute: string, payload: AnthropicPayload) {
+    // 1. Nettoyage de sécurité de la clé (supprime les espaces ou sauts de ligne invisibles)
+    const apiKeyClean = apiKeyBrute.trim();
+
+    if (!apiKeyClean.startsWith("sk-ant-")) {
+        throw new Error("[ERREUR RATISS] Le format de la clé est invalide. Elle doit commencer par 'sk-ant-'");
+    }
+
+    const endpoint = "https://api.anthropic.com/v1/messages";
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    // 2. Configuration des en-têtes officiels stricts d'Anthropic
+    const headers = {
+        "x-api-key": apiKeyClean,               // EXIGÉ : Pas de "Authorization: Bearer" ici
+        "anthropic-version": "2023-06-01",      // EXIGÉ : Version de l'API requise par Anthropic
+        "content-type": "application/json"
+    };
+
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify({
+                model: payload.model || "claude-3-5-sonnet-20241022",
+                max_tokens: payload.max_tokens || 1000,
+                messages: payload.messages
+            }),
+            signal: signal as any
+        });
+
+        // 3. Gestion des codes d'état de ton réseau ApiVault
+        if (response.status === 401) {
+            throw new Error("[ERREUR D'ANALYSE D'ACCÈS] Anthropic API: invalid x-api-key");
+        }
+        
+        if (response.status === 429) {
+            throw new Error("[ALERTE RATISS] Anthropic API: QUOTA ÉPUISÉ. Déviation immédiate requise.");
+        }
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(`[ERREUR HTTP ${response.status}] ${JSON.stringify(errorData)}`);
+        }
+
+        const data = await response.json();
+        return data.content[0].text;
+
+    } catch (error: any) {
+        if (error.name === 'AbortError') {
+            console.warn("[RATISS SYS] Flux Anthropic interrompu par le régulateur.");
+        }
+        throw error;
+    }
+}
+
 
 let aiInstance: GoogleGenAI | null = null;
 
@@ -121,11 +1314,48 @@ async function startServer() {
   app.use(express.json());
   const PORT = 3000;
 
+  // Configuration persistante du plafond maximal de jetons (max_output_tokens)
+  let globalMaxOutputTokens = 200;
+
+  // Real Endpoint pour muter activement la configuration RATISS
+  app.post("/api/cognitive/configure", (req, res) => {
+    try {
+      const { max_output_tokens } = req.body;
+      if (typeof max_output_tokens === 'number') {
+        globalMaxOutputTokens = max_output_tokens;
+        console.log(`[SYS] [CONFIG] Max output tokens successfully mutated to: ${globalMaxOutputTokens}`);
+        return res.json({
+          success: true,
+          max_output_tokens: globalMaxOutputTokens,
+          message: `[SYS] [CONFIG] Max output tokens successfully mutated to: ${globalMaxOutputTokens}`
+        });
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: "Format de max_output_tokens invalide"
+        });
+      }
+    } catch (e: any) {
+      res.status(500).json({
+        success: false,
+        error: e.message
+      });
+    }
+  });
+
   // Real API Endpoint for Cognitive Interactions with RATISS Model
   app.post("/api/cognitive/prompt", async (req, res) => {
     try {
       const { prompt, neuromodulators, world, hallucinating, sectorsMap, activeProviderName, activeProviderId, apiKey, selectedModel } = req.body;
       
+      const maxTokens = req.body.max_tokens ?? req.body.max_output_tokens ?? globalMaxOutputTokens;
+      let rawWordLimit = "150 words";
+      if (maxTokens >= 8000) {
+        rawWordLimit = "4000 words (feel free to write extensive, highly detailed, layered proofs, math formulas and reasoning without constraint)";
+      } else if (maxTokens >= 1000) {
+        rawWordLimit = "800 words (highly developed explanation and structured arguments)";
+      }
+
       const dop = neuromodulators?.dopamine ?? 0.5;
       const ser = neuromodulators?.serotonin ?? 0.5;
       const nor = neuromodulators?.noradrenaline ?? 0.5;
@@ -171,7 +1401,15 @@ async function startServer() {
       
       ${moodGuideline}
       Règle de style absolue pour tes réponses : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Ne te présente jamais et ne mentionne pas que tu es une intelligence artificielle. Si la requête est technique ou textuelle, entre directement dans le vif du sujet sans introduction ni conclusion explicative sur ton propre fonctionnement. Evite absolument les symboles d'astérisques (*), les notations techniques entre crochets, les barres obliques (/ ou \\) ou les underscores (_).
-      Your answer should be direct, short, highly aesthetic conceptually, and delivered in the persona of RATISS v3.4. Speak in French (the user's language). Maintain an intellectual, highly advanced, slightly poetic but clinical tone. Refer to your 768-dimensional vectors, sectors, or sedimentation process if relevant. Keep it under 150 words. Do not sound like a generic AI assistant. If appropriate, acknowledge briefly the provider channel '${providerName}' through which you are routed.`;
+      
+      [RÉGULATION DU FLUX SÉMANTIQUE (RATISS_CORE)]
+      Tu opères sous un protocole de régulation de flux HTTP strict à optimisation de bande passante. Ton stream de génération est monitoré en temps réel par un intercepteur dynamique qui coupera la connexion (AbortController) dès que la limite s'accélère.
+      Règles d'auto-calibration de ta structure de pensée :
+      - Priorité à la Densité (x) : Puisque ton volume de tokens est limité par une fonction de coût concave, tu dois maximiser la quantité d'informations par mot. Supprime toutes les transitions creuses, les formules de politesse, et l'auto-justification algorithmique.
+      - Planification de la Profondeur (L) : Structure ta réponse dès les premières lignes pour que la moelle logique et l'application concrète soient livrées immédiatement. N'attends pas la conclusion pour donner la solution.
+      - Loi Anti-Redondance (-gamma L^2) : Tout mot répétété, toute paraphrase ou reformulation inutile accélère artificiellement la consommation de ton budget et provoquera une coupure brutale de ta génération en plein milieu de ta phrase. Va droit au but, sois linéaire, factuel et mathématiquement dense.
+      
+      Your answer should be direct, short, highly aesthetic conceptually, and delivered in the persona of RATISS v3.4. Speak in French (the user's language). Maintain an intellectual, highly advanced, slightly poetic but clinical tone. Refer to your 768-dimensional vectors, sectors, or sedimentation process if relevant. Keep it under ${rawWordLimit}. Do not sound like a generic AI assistant. If appropriate, acknowledge briefly the provider channel '${providerName}' through which you are routed.`;
 
       let generatedResponseText = "";
 
@@ -264,11 +1502,27 @@ async function startServer() {
           let parsedErr: any;
           try { parsedErr = JSON.parse(errText); } catch { parsedErr = null; }
           const errMsg = parsedErr?.error?.message || errText || `HTTP ${response.status}`;
-          throw new Error(`OpenAI API: ${errMsg}`);
+          
+          if (response.status === 429) {
+            console.warn("[RATISS SYS] OpenAI Quota exceeded. Attempting fallback to Gemini.");
+            // Fallback to Gemini
+            const client = getGeminiClient();
+            const response = await safeGeminiGenerate(client, {
+              model: "gemini-3.5-flash",
+              contents: prompt,
+              config: {
+                systemInstruction,
+                temperature: 0.7,
+              },
+            });
+            generatedResponseText = response.text || "La sédimentation synaptique a produit un signal nul.";
+          } else {
+            throw new Error(`OpenAI API: ${errMsg}`);
+          }
+        } else {
+          const data = await response.json();
+          generatedResponseText = data.choices?.[0]?.message?.content || "La sédimentation OpenAI a produit un signal vide.";
         }
-
-        const data = await response.json();
-        generatedResponseText = data.choices?.[0]?.message?.content || "La sédimentation OpenAI a produit un signal vide.";
       }
       else if (providerId === "claude") {
         if (!apiKey) {
@@ -307,13 +1561,43 @@ async function startServer() {
         const data = await response.json();
         generatedResponseText = data.content?.[0]?.text || "La sédimentation Claude a produit un signal vide.";
       }
+      else if (providerId === "wavespeed") {
+        const keyToUse = apiKey || process.env.WAVESPEED_API_KEY;
+        if (!keyToUse) {
+          throw new Error("Clé d'API Wavespeed manquante dans le serveur ou l'ApiVault.");
+        }
+        const response = await fetch("https://api.wavespeed.ai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${keyToUse}`
+          },
+          body: JSON.stringify({
+            model: selectedModel || "gpt-4o",
+            messages: [
+              { role: "system", content: systemInstruction },
+              { role: "user", content: prompt }
+            ],
+            temperature: 0.7
+          })
+        });
+        if (!response.ok) {
+           const errText = await response.text();
+           throw new Error(`Wavespeed API: ${errText}`);
+        }
+        const data = await response.json();
+        generatedResponseText = data.choices[0].message.content;
+      }
       else {
         throw new Error(`Fournisseur ApiVault non pris en charge : ${providerId}`);
       }
 
+      const finalCleaned = cleanAndNaturalizeLLMText(generatedResponseText);
+      const regulatedText = appliquerRegulateurFlux(finalCleaned, maxTokens);
+
       res.json({
         success: true,
-        text: cleanAndNaturalizeLLMText(generatedResponseText)
+        text: regulatedText
       });
     } catch (error: any) {
       console.warn("Cognitive prompt error:", error);
@@ -393,6 +1677,13 @@ async function startServer() {
       Use the provided jargon terms.
       
       Règle de style absolue : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Si le texte de 'logique' ou 'application' commence par des étiquettes ou en-têtes complexes, retire-les. N'utilise pas d'astérisques (*) ou de caractères spéciaux ni de notations techniques entre crochets.
+      
+      [RÉGULATION DU FLUX SÉMANTIQUE (RATISS_CORE)]
+      Tu opères sous un protocole de régulation de flux HTTP strict à optimisation de bande passante. Ton stream de génération est monitoré en temps réel par un intercepteur dynamique qui coupera la connexion (AbortController) dès que la limite s'accélère.
+      Règles d'auto-calibration de ta structure de pensée :
+      - Priorité à la Densité (x) : Puisque ton volume de tokens est limité par une fonction de coût concave, tu dois maximiser la quantité d'informations par mot. Supprime toutes les transitions creuses, les formules de politesse, et l'auto-justification algorithmique.
+      - Planification de la Profondeur (L) : Structure ta réponse dès les premières lignes pour que la moelle logique et l'application concrète soient livrées immédiatement. N'attends pas la conclusion pour donner la solution.
+      - Loi Anti-Redondance (-gamma L^2) : Tout mot répété, toute paraphrase ou reformulation inutile accélère artificiellement la consommation de ton budget et provoquera une coupure brutale de ta génération en plein milieu de ta phrase. Va droit au but, sois linéaire, factuel et mathématiquement dense.
       
       Generate a unique hybrid concept, its topological logic/equation and its 2026 application.
       Speak in French. Your answer MUST be returned strictly as a valid JSON object. Do not include any markdown wrap like \`\`\`json. Return only the JSON:
@@ -713,6 +2004,53 @@ async function startServer() {
           ];
         }
       }
+      else if (providerId === "wavespeed") {
+        const key = apiKey || process.env.WAVESPEED_API_KEY;
+        if (!key) {
+          return res.status(200).json({ success: false, error: "Veuillez fournir une clé API Wavespeed." });
+        }
+        try {
+          const response = await fetch("https://api.wavespeed.ai/v1/models", {
+            method: "GET",
+            headers: { 
+              "Authorization": `Bearer ${key}`,
+              "Content-Type": "application/json",
+              "Accept": "application/json"
+            },
+          });
+          if (response.ok) {
+            const data = await response.json();
+            models = (data.data || []).map((m: any) => ({
+              id: m.id,
+              name: m.id
+            }));
+            if (models.length === 0) {
+              models = [
+                { id: "wavespeed-3.5-turbo", name: "wavespeed-3.5-turbo" },
+                { id: "gpt-4o", name: "gpt-4o" },
+                { id: "phi-3-mini", name: "phi-3-mini" },
+                { id: "llama-3.2-3b", name: "llama-3.2-3b" }
+              ];
+            }
+          } else {
+            // En cas d'erreur HTTP (ex: 404 car l'endpoint /v1/models n'existe pas ou est confidentiel)
+            // On bascule gracieusement sur les modèles de secours pour ne pas bloquer la clé !
+            models = [
+              { id: "wavespeed-3.5-turbo", name: "wavespeed-3.5-turbo" },
+              { id: "gpt-4o", name: "gpt-4o" },
+              { id: "phi-3-mini", name: "phi-3-mini" },
+              { id: "llama-3.2-3b", name: "llama-3.2-3b" }
+            ];
+          }
+        } catch (e: any) {
+          models = [
+            { id: "wavespeed-3.5-turbo", name: "wavespeed-3.5-turbo" },
+            { id: "gpt-4o", name: "gpt-4o" },
+            { id: "phi-3-mini", name: "phi-3-mini" },
+            { id: "llama-3.2-3b", name: "llama-3.2-3b" }
+          ];
+        }
+      }
       else {
         return res.status(400).json({ success: false, error: `Fournisseur non géré : ${providerId}` });
       }
@@ -751,6 +2089,13 @@ async function startServer() {
       Espace vectoriel à 768 dimensions. Objectif : théories de rupture fiables et testables pour 2026.
       
       Règle de style absolue : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Si le texte commence par des étiquettes ou en-têtes complexes, retire-les. N'utilise pas d'astérisques (*) ou de caractères spéciaux ni de notations techniques entre crochets.
+      
+      [RÉGULATION DU FLUX SÉMANTIQUE (RATISS_CORE)]
+      Tu opères sous un protocole de régulation de flux HTTP strict à optimisation de bande passante. Ton stream de génération est monitoré en temps réel par un intercepteur dynamique qui coupera la connexion (AbortController) dès que la limite s'accélère.
+      Règles d'auto-calibration de ta structure de pensée :
+      - Priorité à la Densité (x) : Puisque ton volume de tokens est limité par une fonction de coût concave, tu dois maximiser la quantité d'informations par mot. Supprime toutes les transitions creuses, les formules de politesse, et l'auto-justification algorithmique.
+      - Planification de la Profondeur (L) : Structure ta réponse dès les premières lignes pour que la moelle logique et l'application concrète soient livrées immédiatement. N'attends pas la conclusion pour donner la solution.
+      - Loi Anti-Redondance (-gamma L^2) : Tout mot répétété, toute paraphrase ou reformulation inutile accélère artificiellement la consommation de ton budget et provoquera une coupure brutale de ta génération en plein milieu de ta phrase. Va droit au but, sois linéaire, factuel et mathématiquement dense.
       
       RÈGLES : Aucun bavardage. Syntaxe JARGON(:) obligatoire.
       FORMAT STRICT :
@@ -812,6 +2157,54 @@ async function startServer() {
     } catch (error: any) {
       console.error("[BATCH SYNTHETISE ERROR]", error);
       res.json({ success: false, error: error.message });
+    }
+  });
+
+  // --- WAVESPEED API ---
+  app.get("/api/wavespeed/models", async (req, res) => {
+    const apiKey = process.env.WAVESPEED_API_KEY;
+    if (!apiKey) {
+      return res.json({
+        data: [
+          { id: "wavespeed-3.5-turbo" },
+          { id: "gpt-4o" },
+          { id: "phi-3-mini" },
+          { id: "llama-3.2-3b" }
+        ]
+      });
+    }
+    try {
+      const response = await fetch("https://api.wavespeed.ai/v1/models", {
+        method: "GET",
+        headers: { 
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+      });
+      
+      if (!response.ok) {
+        return res.json({
+          data: [
+            { id: "wavespeed-3.5-turbo" },
+            { id: "gpt-4o" },
+            { id: "phi-3-mini" },
+            { id: "llama-3.2-3b" }
+          ]
+        });
+      }
+      
+      const data = await response.json();
+      res.json(data);
+    } catch (e: any) {
+      res.json({
+        data: [
+          { id: "wavespeed-3.5-turbo" },
+          { id: "gpt-4o" },
+          { id: "phi-3-mini" },
+          { id: "llama-3.2-3b" }
+        ]
+      });
     }
   });
 

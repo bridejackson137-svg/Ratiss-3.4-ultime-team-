@@ -41,7 +41,7 @@ export interface HallucinationState {
 export interface ApiProvider {
   id: string;
   name: string;
-  priority: number; // 1 to 4
+  priority: number; // 1 to 5
   status: 'active' | 'switching' | 'error';
   quota: string;
   latency: string;

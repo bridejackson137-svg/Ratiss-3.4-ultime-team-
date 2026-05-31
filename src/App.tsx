@@ -84,7 +84,37 @@ export default function App() {
     { id: 'openai', name: 'OpenAI GPT-4o', priority: 2, status: 'active', quota: '25/1000 req', latency: '350ms' },
     { id: 'groq', name: 'Groq LLaMA-3', priority: 3, status: 'active', quota: 'Unlimited', latency: '40ms' },
     { id: 'claude', name: 'Anthropic Claude 3.5', priority: 4, status: 'active', quota: '120/500 req', latency: '420ms' },
+    { id: 'wavespeed', name: 'Wavespeed GPT-4o', priority: 5, status: 'active', quota: 'Unlimited', latency: '200ms' },
   ]);
+
+  // Wavespeed Panel State
+  const [showWavespeedModels, setShowWavespeedModels] = useState(true);
+  const [wavespeedModels, setWavespeedModels] = useState<string[]>(['gpt-4o', 'phi-3-mini', 'llama-3.2-3b']);
+  const [selectedWavespeedIdx, setSelectedWavespeedIdx] = useState(0);
+  const selectedWavespeedModel = wavespeedModels[selectedWavespeedIdx] || 'None';
+
+  const fetchWavespeedModels = async () => {
+    try {
+        const response = await fetch('/api/wavespeed/models');
+        const data = await response.json();
+        if (data.data) {
+            setWavespeedModels(data.data.map((m: any) => m.id));
+        }
+    } catch(e) {
+        console.error("Failed to fetch Wavespeed models", e);
+    }
+  }
+
+  // Toggle Wavespeed list on 'M' key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'm') {
+        setShowWavespeedModels(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Track the currently active routed channel, calculated at send time
   const [activeRoutedId, setActiveRoutedId] = useState<string | null>('gemini');
@@ -105,6 +135,75 @@ export default function App() {
       localStorage.setItem('ratiss_selected_models', JSON.stringify(next));
       return next;
     });
+  };
+
+  // RATISS Paramètres et presets de tokens
+  const [showSettings, setShowSettings] = useState<boolean>(false);
+  const [isApplyingPreset, setIsApplyingPreset] = useState<boolean>(false);
+  const [tokenPreset, setTokenPreset] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('ratiss_token_preset');
+      return saved ? parseInt(saved, 10) : 1000;
+    } catch {
+      return 1000;
+    }
+  });
+
+  const handleUpdateTokenPreset = (preset: number) => {
+    setTokenPreset(preset);
+    try {
+      localStorage.setItem('ratiss_token_preset', preset.toString());
+    } catch {}
+    
+    const presetLabel = preset === 200 ? 'MARGE (200)' : preset === 1000 ? 'MOYEN (1000)' : 'MAXIMUM (8000)';
+    setConsoleEntries(prev => [
+      ...prev,
+      {
+        id: generateUniqueId('cfg-token'),
+        timestamp: new Date().toLocaleTimeString(),
+        text: `[PARAMÈTRE] Seuil de jetons présélectionné : ${presetLabel}. Cliquez sur "APPLIQUER LA CONFIGURATION" pour calibrer le moteur.`,
+        type: 'system',
+      }
+    ]);
+  };
+
+  const handleApplyTokenPreset = async () => {
+    setIsApplyingPreset(true);
+    try {
+      const response = await fetch("/api/cognitive/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_output_tokens: tokenPreset })
+      });
+      const data = await response.json();
+      if (data.success) {
+        const logText = `[SYS] [CONFIG] Max output tokens successfully mutated to: ${tokenPreset}`;
+        setConsoleEntries(prev => [
+          ...prev,
+          {
+            id: generateUniqueId('cfg-apply-success'),
+            timestamp: new Date().toLocaleTimeString(),
+            text: logText,
+            type: 'system',
+          }
+        ]);
+        console.log(logText);
+      } else {
+        throw new Error(data.error || "Erreur de calibrage");
+      }
+    } catch (err: any) {
+      setConsoleEntries(prev => [
+        ...prev,
+        {
+          id: generateUniqueId('cfg-apply-err'),
+          timestamp: new Date().toLocaleTimeString(),
+          text: `[ERREUR CONFIG] Échec du couplage de jetons : ${err.message}`,
+          type: 'error',
+        }
+      ]);
+    } finally {
+      setIsApplyingPreset(false);
+    }
   };
 
   // API alarm state (switches automatically on Gemini malfunction)
@@ -725,7 +824,7 @@ ${resData.application} (Déploiement via infra RATISS v3.4).
       setActiveRoutedId(initialCandidate.id);
     }
 
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       const currentOrder = [...currentProvidersState].sort((a, b) => a.priority - b.priority);
       const activeCandidate = currentOrder.find(p => p.status !== 'error');
 
@@ -786,6 +885,7 @@ ${resData.application} (Déploiement via infra RATISS v3.4).
             activeProviderId: providerId,
             apiKey: candidateApiKey,
             selectedModel: selectedModels[providerId] || "",
+            max_tokens: tokenPreset,
           }),
         });
 
@@ -925,7 +1025,123 @@ ${resData.application} (Déploiement via infra RATISS v3.4).
             <Waves size={11} className="text-purple-400" />
             <span>RÊVE_AUTONOME: <b className={hallucinating.isActive ? 'text-purple-400 font-bold' : 'text-neutral-500'}>{hallucinating.isActive ? 'ACTIF' : 'INACTIF'}</b></span>
           </div>
+
+          {/* RATISS Paramètres Engrenage */}
+          <button 
+            id="ratiss-settings-btn"
+            onClick={() => setShowSettings(!showSettings)} 
+            className={`p-1.5 rounded border transition-all flex items-center gap-1.5 cursor-pointer select-none font-mono font-bold ${
+              showSettings 
+                ? 'bg-indigo-950/90 border-indigo-500 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.4)] animate-pulse' 
+                : 'bg-neutral-900/70 border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white'
+            }`}
+            title="Paramètres RATISS"
+          >
+            <span className="text-xs">⚙️</span>
+            <span className="hidden sm:inline text-[9px]">PARAMÈTRES</span>
+          </button>
         </div>
+
+        {/* Floating Settings Dropdown Panel */}
+        {showSettings && (
+          <div className="absolute right-4 top-[70px] w-[340px] max-w-[calc(100vw-2rem)] bg-neutral-950/98 border border-neutral-800/90 p-4 rounded-xl shadow-[0_4px_30px_rgba(0,0,0,0.8)] backdrop-blur-lg z-50 font-mono text-left animate-in fade-in slide-in-from-top-3 duration-200">
+            <div className="flex items-center justify-between border-b border-neutral-900 pb-2 mb-3">
+              <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                <span>⚙️</span> CONFIGURATION COGNITIVE
+              </span>
+              <button 
+                onClick={() => setShowSettings(false)} 
+                className="text-neutral-500 hover:text-white text-xs cursor-pointer font-bold px-1"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="mb-4">
+              <label className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider block mb-2">
+                Paliers de Tokens de Transmissions
+              </label>
+              
+              <div className="grid grid-cols-3 gap-1.5 mb-3">
+                <button
+                  type="button"
+                  onClick={() => handleUpdateTokenPreset(200)}
+                  className={`py-2 px-1 rounded text-center text-[10px] font-bold border transition-all cursor-pointer ${
+                    tokenPreset === 200
+                      ? 'bg-indigo-950/80 border-indigo-500 text-indigo-300 shadow-[0_0_8px_rgba(99,102,241,0.2)]'
+                      : 'bg-neutral-900/40 border-neutral-800/65 text-neutral-400 hover:border-neutral-700 hover:text-white'
+                  }`}
+                >
+                  <div className="text-sm">⚡</div>
+                  <div>MARGE</div>
+                  <div className="text-[8px] opacity-75">200 tkn</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleUpdateTokenPreset(1000)}
+                  className={`py-2 px-1 rounded text-center text-[10px] font-bold border transition-all cursor-pointer ${
+                    tokenPreset === 1000
+                      ? 'bg-indigo-950/80 border-indigo-500 text-indigo-300 shadow-[0_0_8px_rgba(99,102,241,0.2)]'
+                      : 'bg-neutral-900/40 border-neutral-800/65 text-neutral-400 hover:border-neutral-700 hover:text-white'
+                  }`}
+                >
+                  <div className="text-sm">🌀</div>
+                  <div>MOYEN</div>
+                  <div className="text-[8px] opacity-75">1000 tkn</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleUpdateTokenPreset(8000)}
+                  className={`py-2 px-1 rounded text-center text-[10px] font-bold border transition-all cursor-pointer ${
+                    tokenPreset === 8000
+                      ? 'bg-purple-950/80 border-purple-500 text-purple-300 shadow-[0_0_8px_rgba(168,85,247,0.2)]'
+                      : 'bg-neutral-900/40 border-neutral-800/65 text-neutral-400 hover:border-neutral-700 hover:text-white'
+                  }`}
+                >
+                  <div className="text-xs font-bold">🧬</div>
+                  <div>MAXIMUM</div>
+                  <div className="text-[8px] opacity-75">8000 tkn</div>
+                </button>
+              </div>
+
+              {/* Informative text dependent on choice */}
+              <div className="bg-neutral-900/50 border border-neutral-800/50 p-2.5 rounded text-[9px] text-neutral-400 leading-normal mb-3">
+                {tokenPreset === 200 && (
+                  <span><b>⚙️ MODE MARGE (200 tokens) :</b> Adapté pour les boucles réflexes et les réponses d'aiguillage rapides sans surcharge sémantique.</span>
+                )}
+                {tokenPreset === 1000 && (
+                  <span><b>⚙️ MODE MOYEN (1000 tokens) :</b> Calibré pour la sédimentation synaptique, l'analyse multi-secteurs et les équilibres logiques nominaux.</span>
+                )}
+                {tokenPreset === 8000 && (
+                  <span><b>⚙️ MODE MAXIMUM (8000 tokens) :</b> Déployé pour l'analyse approfondie de physique quantique et les démonstrations de logique formelles et complexes.</span>
+                )}
+              </div>
+
+              {/* Physical Validation Button */}
+              <button
+                type="button"
+                id="apply-token-config-btn"
+                onClick={handleApplyTokenPreset}
+                disabled={isApplyingPreset}
+                className={`w-full py-2 px-3 rounded text-[10px] uppercase font-bold tracking-wider border cursor-pointer flex items-center justify-center gap-1.5 transition-all ${
+                  isApplyingPreset
+                    ? 'bg-neutral-900 border-neutral-800 text-neutral-500 cursor-not-allowed animate-pulse'
+                    : 'bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 border-indigo-500 text-white shadow-[0_0_12px_rgba(99,102,241,0.3)] hover:shadow-[0_0_15px_rgba(99,102,241,0.5)]'
+                }`}
+              >
+                <span>⚙️</span>
+                <span>{isApplyingPreset ? "COUPLAGE EN COURS..." : "CONFIRMER / APPLIQUER LA CONFIGURATION"}</span>
+              </button>
+            </div>
+
+            <div className="pt-2 border-t border-neutral-900 text-[8px] text-neutral-500 flex justify-between items-center">
+              <span>PILOTAGE TEMPS-RÉEL RATISS v3.4</span>
+              <span className="text-emerald-500 font-bold uppercase">ENGIN COUPLÉ ACTIF</span>
+            </div>
+          </div>
+        )}
       </header>
 
       {/* Main Container Layout */}

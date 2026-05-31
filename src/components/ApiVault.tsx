@@ -295,7 +295,7 @@ export const ApiVault: React.FC<ApiVaultProps> = ({
                 <div className="flex items-center justify-between sm:justify-end gap-2 px-1 border-t sm:border-t-0 border-neutral-900/40 pt-1.5 sm:pt-0">
                   <div className="flex items-center gap-1 mr-1 text-[10px]">
                     <span className="text-[9px] text-neutral-500">PRIO :</span>
-                    {[1, 2, 3, 4].map((num) => {
+                    {[1, 2, 3, 4, 5].map((num) => {
                       const isSelected = p.priority === num;
                       return (
                         <button
