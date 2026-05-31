@@ -25,17 +25,45 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
   isPending = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [activeSpeech, setActiveSpeech] = useState<boolean>(false);
+  const activeSpeechRef = useRef<boolean>(false);
 
-  // Stop active speech on unmount
   useEffect(() => {
+    activeSpeechRef.current = activeSpeech;
+  }, [activeSpeech]);
+
+  // Stop active speech on unmount and listen to global stop events
+  useEffect(() => {
+    const handleGlobalSpeechStop = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      // For HallucinationMonitor, we use a unique ID "hallucination-collision" or similar
+      if (detail && detail.sourceId !== 'hallucination-collision') {
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
+        setActiveSpeech(false);
+      }
+    };
+    window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
+
     return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
       window.speechSynthesis.cancel();
+      window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
   }, []);
 
   // Cancel speaking when collision changes
   useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
     window.speechSynthesis.cancel();
     setActiveSpeech(false);
   }, [lastCollision]);
@@ -70,32 +98,122 @@ export const HallucinationMonitor: React.FC<HallucinationMonitorProps> = ({
   const handleTTS = () => {
     if (!lastCollision) return;
 
-    if (window.speechSynthesis.speaking && activeSpeech) {
+    if (activeSpeech) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audioRef.current) {
+        (window as any).__activeAudio = null;
+      }
       window.speechSynthesis.cancel();
       setActiveSpeech(false);
       return;
     }
 
+    // Stop current local or native speech globally
+    if ((window as any).__activeAudio) {
+      try {
+        (window as any).__activeAudio.pause();
+      } catch (e) {}
+      (window as any).__activeAudio = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
     window.speechSynthesis.cancel();
+
+    // Trigger global synchronization event so other components clear their playing state
+    window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: 'hallucination-collision' } }));
 
     // Focus only on Concept + Logic + Application
     const rawText = `${lastCollision.concept}. ${lastCollision.logique}. Application : ${lastCollision.application}`;
     const cleanedText = calibrerEtEpurerTexte(rawText);
 
-    const utterance = new SpeechSynthesisUtterance(cleanedText);
-    utterance.lang = 'fr-FR';
-    utterance.rate = 1.05; // Slightly faster for smooth human flow
-    utterance.pitch = 0.85; // Warmer pitch
+    // Encode text for local Piper TTS API
+    const encodedText = encodeURIComponent(cleanedText);
+    const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
-    utterance.onend = () => {
-      setActiveSpeech(false);
-    };
-    utterance.onerror = () => {
-      setActiveSpeech(false);
-    };
-
+    const audio = new Audio(audioUrl);
+    audioRef.current = audio;
+    (window as any).__activeAudio = audio;
     setActiveSpeech(true);
-    window.speechSynthesis.speak(utterance);
+
+    audio.play().catch(err => {
+      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (err.name === 'AbortError') {
+        return;
+      }
+      console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(cleanedText);
+        utterance.lang = 'fr-FR';
+        utterance.rate = 1.05;
+        utterance.pitch = 0.85;
+        utterance.onend = () => {
+          if (activeSpeechRef.current) {
+            setActiveSpeech(false);
+          }
+        };
+        utterance.onerror = () => {
+          if (activeSpeechRef.current) {
+            setActiveSpeech(false);
+          }
+        };
+        window.speechSynthesis.speak(utterance);
+      } catch (synthErr) {
+        if (activeSpeechRef.current) {
+          setActiveSpeech(false);
+        }
+      }
+    });
+
+    audio.onended = () => {
+      if (activeSpeechRef.current) {
+        setActiveSpeech(false);
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
+
+    audio.onerror = () => {
+      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
+      if (activeSpeechRef.current) {
+        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(cleanedText);
+          utterance.lang = 'fr-FR';
+          utterance.rate = 1.05;
+          utterance.pitch = 0.85;
+          utterance.onend = () => {
+            if (activeSpeechRef.current) {
+              setActiveSpeech(false);
+            }
+          };
+          utterance.onerror = () => {
+            if (activeSpeechRef.current) {
+              setActiveSpeech(false);
+            }
+          };
+          window.speechSynthesis.speak(utterance);
+        } catch (synthErr) {
+          setActiveSpeech(false);
+        }
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
   };
 
   // Animate dynamic waveform on Canvas to represent Delta Semantic Drift

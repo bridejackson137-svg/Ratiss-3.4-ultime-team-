@@ -4,6 +4,9 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import { AbortController } from 'node-abort-controller';
+import { execSync } from "child_process";
+import crypto from "crypto";
+import fs from "fs";
 
 dotenv.config();
 
@@ -2205,6 +2208,77 @@ async function startServer() {
           { id: "llama-3.2-3b" }
         ]
       });
+    }
+  });
+
+  // --- LOCAL PIPER TTS ENGINE ---
+  function nettoyerTextePourDiction(text: string): string {
+    let cleaned = text;
+
+    const dicoCorrection: { [key: string]: string } = {
+      "\\bTTS\\b": "tétéèsse",
+      "\\bONNX\\b": "onéneix",
+      "\\bMo\\b": "méga octets",
+      "\\bRATISS\\b": "ratisse"
+    };
+
+    for (const [pattern, replacement] of Object.entries(dicoCorrection)) {
+      const regex = new RegExp(pattern, "gi");
+      cleaned = cleaned.replace(regex, replacement);
+    }
+
+    // Correction des versions et décimales (ex: 3.5 -> 3 virgule 5)
+    cleaned = cleaned.replace(/(\d+)\.(\d+)/g, "$1 virgule $2");
+
+    return cleaned;
+  }
+
+  app.get("/api/cognitive/tts", async (req, res) => {
+    try {
+      const text = req.query.text as string;
+      if (!text) {
+        return res.status(400).json({ error: "Texte manquant pour la synthèse vocale." });
+      }
+
+      // Nettoyage phonétique du texte avant validation par le modèle
+      const textCalibre = nettoyerTextePourDiction(text);
+
+      // Generation d'un nom de fichier temporaire unique
+      const tempId = crypto.randomBytes(16).toString("hex");
+      const tempWavPath = path.join(process.cwd(), `temp_${tempId}.wav`);
+
+      // Commande d'execution du binaire Piper avec calibrage d'usine officiel
+      const cmd = `./piper/piper --model modeles/modele_piper.onnx --config modeles/modele_piper.onnx.json --speaker 1 --length_scale 1.25 --noise_scale 0.667 --noise_w 0.800 --output_file "${tempWavPath}"`;
+      
+      execSync(cmd, {
+        input: textCalibre,
+        encoding: "utf8"
+      });
+
+      if (!fs.existsSync(tempWavPath)) {
+        throw new Error("L'audio n'a pas pu être synthétisé par Piper.");
+      }
+
+      // Renvoyer le fichier WAV généré
+      res.setHeader("Content-Type", "audio/wav");
+      const fileStream = fs.createReadStream(tempWavPath);
+      fileStream.pipe(res);
+
+      fileStream.on("end", () => {
+        // Supprimer le fichier temporaire apres un bref délai pour eviter tout verrou
+        setTimeout(() => {
+          try {
+            if (fs.existsSync(tempWavPath)) {
+              fs.unlinkSync(tempWavPath);
+            }
+          } catch (e) {
+            console.error("Erreur de suppression du fichier WAV temporaire:", e);
+          }
+        }, 1000);
+      });
+    } catch (err: any) {
+      console.error("[LOCAL TTS ERROR]", err);
+      res.status(500).json({ error: err.message || "Erreur de synthèse vocale locale." });
     }
   });
 

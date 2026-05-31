@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase, isSupabaseConfigured } from '../supabase';
 import { Zap, Sparkles, Copy, RefreshCw, Trash2, ShieldCheck, Check } from 'lucide-react';
 
@@ -28,11 +28,34 @@ export default function ArchiveSingularites() {
   const [activeSpeechId, setActiveSpeechId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorInfo, setErrorInfo] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeSpeechIdRef = useRef<string | null>(null);
 
-  // Stop active speech on unmount
   useEffect(() => {
+    activeSpeechIdRef.current = activeSpeechId;
+  }, [activeSpeechId]);
+
+  // Stop active speech on unmount and listen to global stop events
+  useEffect(() => {
+    const handleGlobalSpeechStop = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.sourceId !== activeSpeechIdRef.current) {
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
+        setActiveSpeechId(null);
+      }
+    };
+    window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
+
     return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
       window.speechSynthesis.cancel();
+      window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
   }, []);
 
@@ -64,13 +87,34 @@ export default function ArchiveSingularites() {
   };
 
   const handleTTS = (reve: ReveLucide) => {
-    if (window.speechSynthesis.speaking && activeSpeechId === reve.id) {
+    if (activeSpeechId === reve.id) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audioRef.current) {
+        (window as any).__activeAudio = null;
+      }
       window.speechSynthesis.cancel();
       setActiveSpeechId(null);
       return;
     }
 
+    // Stop current local or native speech globally
+    if ((window as any).__activeAudio) {
+      try {
+        (window as any).__activeAudio.pause();
+      } catch (e) {}
+      (window as any).__activeAudio = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
     window.speechSynthesis.cancel();
+
+    // Trigger global synchronization event so other components clear their playing state
+    window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: reve.id } }));
 
     const titre = reve.titre || reve.concept_hybride || reve.concept || 'Concept stabilisé';
     const logique = reve.logique || '';
@@ -80,20 +124,89 @@ export default function ArchiveSingularites() {
     const rawText = `${titre}. ${logique}. Application : ${application}`;
     const cleanedText = calibrerEtEpurerTexte(rawText);
 
-    const utterance = new SpeechSynthesisUtterance(cleanedText);
-    utterance.lang = 'fr-FR';
-    utterance.rate = 1.05; // Slightly faster for natural transition
-    utterance.pitch = 0.85; // Warmer pitch, less robotic
+    // Encode text for local Piper TTS API
+    const encodedText = encodeURIComponent(cleanedText);
+    const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
-    utterance.onend = () => {
-      setActiveSpeechId(null);
-    };
-    utterance.onerror = () => {
-      setActiveSpeechId(null);
-    };
-
+    const audio = new Audio(audioUrl);
+    audioRef.current = audio;
+    (window as any).__activeAudio = audio;
     setActiveSpeechId(reve.id);
-    window.speechSynthesis.speak(utterance);
+
+    audio.play().catch(err => {
+      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (err.name === 'AbortError') {
+        return;
+      }
+      console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(cleanedText);
+        utterance.lang = 'fr-FR';
+        utterance.rate = 1.05;
+        utterance.pitch = 0.85;
+        utterance.onend = () => {
+          if (activeSpeechIdRef.current === reve.id) {
+            setActiveSpeechId(null);
+          }
+        };
+        utterance.onerror = () => {
+          if (activeSpeechIdRef.current === reve.id) {
+            setActiveSpeechId(null);
+          }
+        };
+        window.speechSynthesis.speak(utterance);
+      } catch (synthErr) {
+        if (activeSpeechIdRef.current === reve.id) {
+          setActiveSpeechId(null);
+        }
+      }
+    });
+
+    audio.onended = () => {
+      if (activeSpeechIdRef.current === reve.id) {
+        setActiveSpeechId(null);
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
+
+    audio.onerror = () => {
+      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
+      if (activeSpeechIdRef.current === reve.id) {
+        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(cleanedText);
+          utterance.lang = 'fr-FR';
+          utterance.rate = 1.05;
+          utterance.pitch = 0.85;
+          utterance.onend = () => {
+            if (activeSpeechIdRef.current === reve.id) {
+              setActiveSpeechId(null);
+            }
+          };
+          utterance.onerror = () => {
+            if (activeSpeechIdRef.current === reve.id) {
+              setActiveSpeechId(null);
+            }
+          };
+          window.speechSynthesis.speak(utterance);
+        } catch (synthErr) {
+          setActiveSpeechId(null);
+        }
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
   };
 
   // Load from both Local Cache and Supabase if active

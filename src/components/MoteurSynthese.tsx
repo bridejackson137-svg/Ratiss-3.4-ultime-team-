@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Brain, Zap, Loader2, Sparkles, Terminal, Info, Copy, Check, RefreshCw, Maximize2, Minimize2, ChevronDown, ChevronRight, Hash, Search } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../supabase';
 import { ConceptExtended } from '../types';
@@ -16,11 +16,34 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
   const [logsState, setLogsState] = useState<string[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [activeSpeechId, setActiveSpeechId] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeSpeechIdRef = useRef<string | null>(null);
 
-  // Stop active speech on unmount
-  React.useEffect(() => {
+  useEffect(() => {
+    activeSpeechIdRef.current = activeSpeechId;
+  }, [activeSpeechId]);
+
+  // Stop active speech on unmount and listen to global stop events
+  useEffect(() => {
+    const handleGlobalSpeechStop = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.sourceId !== activeSpeechIdRef.current) {
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
+        setActiveSpeechId(null);
+      }
+    };
+    window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
+
     return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
       window.speechSynthesis.cancel();
+      window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
   }, []);
 
@@ -56,34 +79,123 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
   };
 
   const handleTTS = (item: ConceptExtended) => {
-    // If the clicked one is speaking, stop it
-    if (window.speechSynthesis.speaking && activeSpeechId === item.id) {
+    // If the clicked one is speaking, stop it unconditionally
+    if (activeSpeechId === item.id) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audioRef.current) {
+        (window as any).__activeAudio = null;
+      }
       window.speechSynthesis.cancel();
       setActiveSpeechId(null);
       return;
     }
 
-    // Cancel any current speaking utterance
+    // Stop current local or native speech globally
+    if ((window as any).__activeAudio) {
+      try {
+        (window as any).__activeAudio.pause();
+      } catch (e) {}
+      (window as any).__activeAudio = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
     window.speechSynthesis.cancel();
+
+    // Trigger global synchronization event so other components clear their playing state
+    window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: item.id } }));
 
     // Text synthesis compilation (only essential Title + Logic + Application)
     const rawText = `${item.titre}. ${item.logique}. Application : ${item.application}`;
     const cleanedText = calibrerEtEpurerTexte(rawText, vecteurRecherche);
 
-    const utterance = new SpeechSynthesisUtterance(cleanedText);
-    utterance.lang = 'fr-FR';
-    utterance.rate = 1.05; // Pose translation, slightly faster for smooth flow
-    utterance.pitch = 0.85; // Warmer, less metallic voice tone
+    // Encode text for local Piper TTS API
+    const encodedText = encodeURIComponent(cleanedText);
+    const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
-    utterance.onend = () => {
-      setActiveSpeechId(null);
-    };
-    utterance.onerror = () => {
-      setActiveSpeechId(null);
-    };
-
+    const audio = new Audio(audioUrl);
+    audioRef.current = audio;
+    (window as any).__activeAudio = audio;
     setActiveSpeechId(item.id);
-    window.speechSynthesis.speak(utterance);
+
+    audio.play().catch(err => {
+      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (err.name === 'AbortError') {
+        return;
+      }
+      console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(cleanedText);
+        utterance.lang = 'fr-FR';
+        utterance.rate = 1.05;
+        utterance.pitch = 0.85;
+        utterance.onend = () => {
+          if (activeSpeechIdRef.current === item.id) {
+            setActiveSpeechId(null);
+          }
+        };
+        utterance.onerror = () => {
+          if (activeSpeechIdRef.current === item.id) {
+            setActiveSpeechId(null);
+          }
+        };
+        window.speechSynthesis.speak(utterance);
+      } catch (synthErr) {
+        if (activeSpeechIdRef.current === item.id) {
+          setActiveSpeechId(null);
+        }
+      }
+    });
+
+    audio.onended = () => {
+      if (activeSpeechIdRef.current === item.id) {
+        setActiveSpeechId(null);
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
+
+    audio.onerror = () => {
+      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
+      if (activeSpeechIdRef.current === item.id) {
+        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(cleanedText);
+          utterance.lang = 'fr-FR';
+          utterance.rate = 1.05;
+          utterance.pitch = 0.85;
+          utterance.onend = () => {
+            if (activeSpeechIdRef.current === item.id) {
+              setActiveSpeechId(null);
+            }
+          };
+          utterance.onerror = () => {
+            if (activeSpeechIdRef.current === item.id) {
+              setActiveSpeechId(null);
+            }
+          };
+          window.speechSynthesis.speak(utterance);
+        } catch (synthErr) {
+          setActiveSpeechId(null);
+        }
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
   };
 
   // UI CONTROLS

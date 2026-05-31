@@ -26,11 +26,34 @@ export const Console: React.FC<ConsoleProps> = ({
   const [isConsoleExpanded, setIsConsoleExpanded] = useState(false);
   const [activeConsoleSpeechId, setActiveConsoleSpeechId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeConsoleSpeechIdRef = useRef<string | null>(null);
 
-  // Stop speech on unmount
   useEffect(() => {
+    activeConsoleSpeechIdRef.current = activeConsoleSpeechId;
+  }, [activeConsoleSpeechId]);
+
+  // Stop speech on unmount and listen to global stop events
+  useEffect(() => {
+    const handleGlobalSpeechStop = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.sourceId !== activeConsoleSpeechIdRef.current) {
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
+        setActiveConsoleSpeechId(null);
+      }
+    };
+    window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
+
     return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
       window.speechSynthesis.cancel();
+      window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
     };
   }, []);
 
@@ -66,31 +89,121 @@ export const Console: React.FC<ConsoleProps> = ({
   };
 
   const handleConsoleTTS = (entry: ConsoleEntry) => {
-    if (window.speechSynthesis.speaking && activeConsoleSpeechId === entry.id) {
+    if (activeConsoleSpeechId === entry.id) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audioRef.current) {
+        (window as any).__activeAudio = null;
+      }
       window.speechSynthesis.cancel();
       setActiveConsoleSpeechId(null);
       return;
     }
 
+    // Stop current local or native speech globally
+    if ((window as any).__activeAudio) {
+      try {
+        (window as any).__activeAudio.pause();
+      } catch (e) {}
+      (window as any).__activeAudio = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
     window.speechSynthesis.cancel();
+
+    // Trigger global synchronization event so other components clear their playing state
+    window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: entry.id } }));
 
     const rawText = entry.text.trim();
     const cleanedText = cleanAndNaturalizeConsoleSpeech(rawText, discussionValue);
 
-    const utterance = new SpeechSynthesisUtterance(cleanedText);
-    utterance.lang = 'fr-FR';
-    utterance.rate = 1.05; // Slightly faster for flow
-    utterance.pitch = 0.85; // Warmer tone
+    // Encode text for local Piper TTS API
+    const encodedText = encodeURIComponent(cleanedText);
+    const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
-    utterance.onend = () => {
-      setActiveConsoleSpeechId(null);
-    };
-    utterance.onerror = () => {
-      setActiveConsoleSpeechId(null);
-    };
-
+    const audio = new Audio(audioUrl);
+    audioRef.current = audio;
+    (window as any).__activeAudio = audio;
     setActiveConsoleSpeechId(entry.id);
-    window.speechSynthesis.speak(utterance);
+
+    audio.play().catch(err => {
+      // If the execution was aborted by the user hitting stop, do not trigger fallback!
+      if (err.name === 'AbortError') {
+        return;
+      }
+      console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(cleanedText);
+        utterance.lang = 'fr-FR';
+        utterance.rate = 1.05;
+        utterance.pitch = 0.85;
+        utterance.onend = () => {
+          if (activeConsoleSpeechIdRef.current === entry.id) {
+            setActiveConsoleSpeechId(null);
+          }
+        };
+        utterance.onerror = () => {
+          if (activeConsoleSpeechIdRef.current === entry.id) {
+            setActiveConsoleSpeechId(null);
+          }
+        };
+        window.speechSynthesis.speak(utterance);
+      } catch (synthErr) {
+        if (activeConsoleSpeechIdRef.current === entry.id) {
+          setActiveConsoleSpeechId(null);
+        }
+      }
+    });
+
+    audio.onended = () => {
+      if (activeConsoleSpeechIdRef.current === entry.id) {
+        setActiveConsoleSpeechId(null);
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
+
+    audio.onerror = () => {
+      // True loading/network error: trigger browser fallback to make sure audio plays if server failed
+      if (activeConsoleSpeechIdRef.current === entry.id) {
+        console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(cleanedText);
+          utterance.lang = 'fr-FR';
+          utterance.rate = 1.05;
+          utterance.pitch = 0.85;
+          utterance.onend = () => {
+            if (activeConsoleSpeechIdRef.current === entry.id) {
+              setActiveConsoleSpeechId(null);
+            }
+          };
+          utterance.onerror = () => {
+            if (activeConsoleSpeechIdRef.current === entry.id) {
+              setActiveConsoleSpeechId(null);
+            }
+          };
+          window.speechSynthesis.speak(utterance);
+        } catch (synthErr) {
+          setActiveConsoleSpeechId(null);
+        }
+      }
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      if ((window as any).__activeAudio === audio) {
+        (window as any).__activeAudio = null;
+      }
+    };
   };
 
   // Auto-scroll on new entries
