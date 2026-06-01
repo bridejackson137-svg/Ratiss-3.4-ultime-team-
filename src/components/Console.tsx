@@ -26,6 +26,16 @@ export const Console: React.FC<ConsoleProps> = ({
   const [isConsoleExpanded, setIsConsoleExpanded] = useState(false);
   const [activeConsoleSpeechId, setActiveConsoleSpeechId] = useState<string | null>(null);
   const [isSpeechPaused, setIsSpeechPaused] = useState<boolean>(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const handleCopyText = (text: string, id: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    }).catch(err => {
+      console.error("Clipboard copy failed", err);
+    });
+  };
   const scrollRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeConsoleSpeechIdRef = useRef<string | null>(null);
@@ -414,7 +424,7 @@ export const Console: React.FC<ConsoleProps> = ({
                   )}
                   {entry.type === 'response' && (
                     <div className="relative group/speech">
-                      <div className={`text-neutral-300 bg-neutral-900/30 rounded border border-neutral-950 whitespace-pre-line leading-relaxed select-text shadow-inner transition-all ${isConsoleExpanded ? 'p-4 pr-24 text-xs sm:text-sm bg-neutral-900/50 gap-2 border-neutral-800' : 'p-2 pr-20 text-[11px]'}`}>
+                      <div className={`text-neutral-300 bg-neutral-900/30 rounded border border-neutral-950 whitespace-pre-line leading-relaxed select-text shadow-inner transition-all ${isConsoleExpanded ? 'p-4 pr-32 text-xs sm:text-sm bg-neutral-900/50 gap-2 border-neutral-800' : 'p-2 pr-28 text-[11px]'}`}>
                         {entry.text}
                       </div>
                       <div className="absolute top-2.5 right-2 flex gap-1 items-center">
@@ -436,6 +446,18 @@ export const Console: React.FC<ConsoleProps> = ({
                             {isSpeechPaused ? '▶️ REPRENDRE' : '⏸ PAUSE'}
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => handleCopyText(entry.text, entry.id)}
+                          className={`px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all border ${
+                            copiedId === entry.id
+                              ? 'bg-indigo-950 border-indigo-500 text-indigo-300 font-bold animate-pulse'
+                              : 'bg-indigo-950/40 border-indigo-900 text-indigo-400 hover:bg-indigo-900/40 opacity-75 group-hover/speech:opacity-100'
+                          }`}
+                          title="Copier la réponse"
+                        >
+                          {copiedId === entry.id ? '✓ COPIÉ' : '📋 COPIER'}
+                        </button>
                       </div>
                     </div>
                   )}

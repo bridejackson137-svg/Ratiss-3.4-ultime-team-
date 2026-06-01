@@ -2617,6 +2617,17 @@ async function startServer() {
     res.send(Buffer.concat(audioBuffers));
   }
 
+  const RATISS_AUDIO_CONFIG = {
+    binaire: "./piper/piper",
+    voix_principale: "fr_FR-gilles-high.onnx",
+    config_json: "fr_FR-gilles-high.onnx.json",
+    parametres_moteur: {
+        length_scale: 0.85, // Vitesse moyenne/normale calibrée
+        noise_scale: 0.667,  // Conservé par défaut pour la clarté
+        noise_w: 0.8
+    }
+  };
+
   app.get("/api/cognitive/tts", async (req, res) => {
     try {
       const text = req.query.text as string;
@@ -2671,7 +2682,7 @@ async function startServer() {
       // Commande d'execution du binaire Piper avec calibrage d'usine officiel
       // Pour modele_piper.onnx, le speaker 1 est "pierre" (voix homme). Pour Gilles, speaker 0 est Gilles (voix homme).
       const speakerId = modelOnnxPath.includes("modele_piper.onnx") ? "1" : "0";
-      const cmd = `${piperPath} --model ${modelOnnxPath} --config ${configJsonPath} --speaker ${speakerId} --length_scale 1.25 --noise_scale 0.667 --noise_w 0.800 --output_file "${tempWavPath}"`;
+      const cmd = `${piperPath} --model ${modelOnnxPath} --config ${configJsonPath} --speaker ${speakerId} --length_scale ${RATISS_AUDIO_CONFIG.parametres_moteur.length_scale} --noise_scale ${RATISS_AUDIO_CONFIG.parametres_moteur.noise_scale} --noise_w ${RATISS_AUDIO_CONFIG.parametres_moteur.noise_w} --output_file "${tempWavPath}"`;
       
       try {
         const piperLibPath = path.join(process.cwd(), "piper");
@@ -2781,13 +2792,9 @@ async function startServer() {
       return res.status(200).json({
           architecture: "RATISS 4 FUSION",
           version: "4.0.0-fusion",
-          builder: "Jonathan",
-          local_tts: {
-              binaire: "./piper/piper",
-              voix_principale: "fr_FR-gilles-low.onnx",
-              config: "fr_FR-gilles-low.onnx.json"
-          },
-          perseverance_engine: "ACTIVE"
+          speech_profile: "MOYEN_STANDARD",
+          length_scale: RATISS_AUDIO_CONFIG.parametres_moteur.length_scale,
+          status: "OPERATIONAL"
       });
   });
 
