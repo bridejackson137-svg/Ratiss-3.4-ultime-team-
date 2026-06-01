@@ -12,12 +12,12 @@ export const supabase = isSupabaseConfigured
 
 if (!isSupabaseConfigured) {
   console.log(
-    '%c[RATISS SYSTEM INFO] Supabase non configuré. Le simulateur v3.4 utilise son moteur local de sédimentation synaptique et sa simulation temps-réel bio-oscillatoire par défaut.',
+    '%c[RATISS SYSTEM INFO] Supabase non configuré. Le simulateur RATISS 4 FUSION utilise son moteur local de sédimentation synaptique et sa simulation temps-réel bio-oscillatoire par défaut.',
     'color: #818cf8; font-weight: bold; background: #0c0a09; padding: 4px; border-radius: 4px;'
   );
 } else {
   console.log(
-    '%c[RATISS SUPABASE CONNECTED] Connexion temps-réel Supabase initialisée pour RATISS v3.4.',
+    '%c[RATISS SUPABASE CONNECTED] Connexion temps-réel Supabase initialisée pour RATISS 4 FUSION.',
     'color: #10b981; font-weight: bold; background: #0c0a09; padding: 4px; border-radius: 4px;'
   );
 }

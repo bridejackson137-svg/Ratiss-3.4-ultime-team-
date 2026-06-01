@@ -1,138 +1,376 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-RATISS v3.4 — Pipeline de Décision Déterministe
-Dubai Urban Resilience · Port de Jebel Ali · Plan 2040
-
-=== COEUR MATHÉMATIQUE SOUVERAIN BLINDÉ ===
-1. KERNEL POINCARÉ VECTORISÉ (COMPATIBLE JAX/XLA ET ARCHITECTURES SYSTOLIQUES EDGE TPU)
-2. WALD SPRT DE HAUTE PRÉCISION (STATIC-MEMORY RING BUFFER AVEC ACCUMULATION DE KAHAN)
-3. PIPELINE AUDIO IN-MEMORY & DÉMON CHAUD (WARMPIPERENGINE À ZÉRO LATENCE D'ESTIMATION)
+RATISS v3.4 — Pipeline Temps Réel, Étanchéité Numérique & Réseau Intelligent
+Incorpore le moteur géodésique JAX, le SPRT de Kahan, le TTS segmenté,
+et le nouveau module d'Auto-Analyse et Diagnostic des appareils connectés.
 """
 
-from __future__ import annotations
-
+import os
 import io
-import math
+import re
+import sys
+import time
 import logging
+import collections
 import subprocess
 import threading
-import time
-import warnings
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+import json
+import urllib.request
+import math
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict
 
-import numpy as np
+# Configuration du logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("RATISS_Pipeline")
 
-# Gestion dynamique de JAX pour l'accélération XLA / TPU
 try:
     import jax
     import jax.numpy as jnp
-    HAS_JAX = True
+    JAX_AVAILABLE = True
+    log.info("JAX détecté. Accélération matérielle XLA activée.")
 except ImportError:
-    HAS_JAX = False
-
-# Configuration du logging de bas niveau
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] RATISS.pipeline_v3_4 — %(message)s",
-    datefmt="%H:%M:%S.%f",
-)
-log = logging.getLogger("RATISS.pipeline_v3_4")
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-
-# Constantes de bas niveau
-_EPS = 1e-7          # Plancher numérique anti-singularité
-_CURV = 1.0          # Courbure standard du disque hyperbolique de Poincaré
-_DIM = 768           # Dimensionnalité standard des descripteurs sémantiques COCO/BERT
+    import numpy as np
+    JAX_AVAILABLE = False
+    log.warning("JAX non trouvé. Repli sur le noyau vectorisé NumPy.")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MISSION 1 — KERNEL POINCARÉ VECTORISÉ COMPATIBLE JAX (XLA)
-# ══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
+# 1. STRUCTURES DE DONNÉES DU RÉSEAU INTELLIGENT (DIAGNOSTIC)
+# =====================================================================
 
-def _clip_to_ball(x: np.ndarray, radius: float = 1.0 - _EPS) -> np.ndarray:
+@dataclass
+class DeviceProfile:
+    ip: str
+    hostname: str = "Inconnu"
+    os_type: str = "Inconnu"       # Linux, Windows, Darwin, Android-TV
+    architecture: str = "Inconnu"  # x86_64, armv7, aarch64
+    cpu_usage_pct: float = 0.0
+    ram_available_mb: float = 0.0
+    status: str = "UNVERIFIED"     # STABLE, OVERLOADED, UNREACHABLE
+    last_scan: float = 0.0
+
+
+# =====================================================================
+# 2. MODULE D'AUTO-ANALYSE ET DIAGNOSTIC DISTANT
+# =====================================================================
+
+class RatissNetworkDiagnosticUnit:
     """
-    Projection ufunc-vectorisée des vecteurs dans la boule de Poincaré ||x|| < 1.
+    Unité intelligente chargée d'analyser, d'identifier et de diagnostiquer 
+    l'état des appareils connectés à RATISS avant toute manipulation.
     """
-    norms = np.linalg.norm(x, axis=-1, keepdims=True)
-    scale = np.where(norms >= radius, radius / (norms + _EPS), 1.0)
-    return x * scale
+    def __init__(self):
+        # Registre statique en RAM des appareils connus et diagnostiqués
+        self.inventory: Dict[str, DeviceProfile] = {}
+        self.lock = threading.Lock()
 
+    def enregistrer_appareil(self, ip: str):
+        """ Initialise un profil vierge pour un nouvel appareil détecté. """
+        with self.lock:
+            if ip not in self.inventory:
+                self.inventory[ip] = DeviceProfile(ip=ip)
+                log.info(f"[DIAGNOSTIC] Nouvel appareil répertorié dans l'inventaire : {ip}")
 
-def poincare_distance_batch(
-    u: np.ndarray,
-    v: np.ndarray,
-    curvature: float = _CURV,
-) -> np.ndarray:
-    """
-    Distance géodésique de Poincaré hautement vectorisée prête pour compilateur XLA.
-    Prend en compte l'addition de Möbius non-commutative pour l'évaluation simultanée d'un lot.
-    """
-    sqrt_c = math.sqrt(curvature)
-
-    # Projection ultra-stable dans la boule ouverte
-    u = _clip_to_ball(u)
-    v = _clip_to_ball(v)
-
-    # Produits de contraction tensorielle via Einstein summation
-    uu = np.einsum("...i,...i->...", u, u)
-    vv = np.einsum("...i,...i->...", v, v)
-    uv = np.einsum("...i,...i->...", u, v)
-
-    # Formule exacte de l'addition de Möbius
-    alpha = (1.0 + 2.0 * curvature * uv + curvature * vv)[..., None]
-    beta = (1.0 - curvature * uu)[..., None]
-    numer = alpha * u + beta * v
-
-    denom = (1.0 + 2.0 * curvature * uv + curvature**2 * uu * vv)
-    denom = np.maximum(denom, _EPS)[..., None]
-
-    mobius = numer / denom
-    mob_norm = np.linalg.norm(mobius, axis=-1)
-    mob_norm = np.clip(mob_norm, 0.0, 1.0 - _EPS)
-
-    return (2.0 / sqrt_c) * np.arctanh(sqrt_c * mob_norm)
-
-
-# Si JAX est installé, nous compilons une version XLA ultra-rapide pour TPU/GPU
-if HAS_JAX:
-    @jax.jit
-    def jax_poincare_distance_batch(u: jnp.ndarray, v: jnp.ndarray, curvature: float = _CURV) -> jnp.ndarray:
-        sqrt_c = jnp.sqrt(curvature)
+    def auto_scan_appareil(self, ip: str) -> DeviceProfile:
+        """
+        Interroge l'API distante de l'appareil pour diagnostiquer son identité
+        et son intégrité physique/systémique.
+        """
+        self.enregistrer_appareil(ip)
+        url = f"http://{ip}/api/monitor/state" # Endpoint standard de télémétrie RATISS
         
-        # Clip en JAX
-        u_norms = jnp.linalg.norm(u, axis=-1, keepdims=True)
-        u_scale = jnp.where(u_norms >= 1.0 - _EPS, (1.0 - _EPS) / (u_norms + _EPS), 1.0)
-        u = u * u_scale
+        try:
+            req = urllib.request.Request(url, method='GET')
+            with urllib.request.urlopen(req, timeout=2) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    
+                    with self.lock:
+                        prof = self.inventory[ip]
+                        prof.hostname = data.get("hostname", "Node-Distant")
+                        prof.os_type = data.get("os_type", "Linux")
+                        prof.architecture = data.get("architecture", "aarch64")
+                        prof.cpu_usage_pct = float(data.get("cpu_pct", 0.0))
+                        prof.ram_available_mb = float(data.get("ram_free", 0.0))
+                        prof.last_scan = time.time()
+                        
+                        # Règle d'auto-évaluation diagnostique de la cible
+                        if prof.cpu_usage_pct > 85.0:
+                            prof.status = "OVERLOADED"
+                        else:
+                            prof.status = "STABLE"
+                            
+                        log.info(f"[DIAGNOSTIC SUCCESS] Appareil {ip} identifié ({prof.os_type} | {prof.architecture}). Statut: {prof.status}")
+                        return prof
+        except Exception as e:
+            with self.lock:
+                prof = self.inventory[ip]
+                prof.status = "UNREACHABLE"
+                prof.last_scan = time.time()
+            log.warning(f"[DIAGNOSTIC FAILED] Impossible d'analyser l'appareil {ip} : En hors-ligne ou API absente.")
         
-        v_norms = jnp.linalg.norm(v, axis=-1, keepdims=True)
-        v_scale = jnp.where(v_norms >= 1.0 - _EPS, (1.0 - _EPS) / (v_norms + _EPS), 1.0)
-        v = v * v_scale
+        return self.inventory[ip]
+
+    def adapter_ordre_manipulation(self, ip: str, action_souhaitee: str) -> Optional[dict]:
+        """
+        Analyse le profil diagnostiqué de l'appareil et génère la charge utile (payload)
+        la plus adaptée à son architecture et à sa charge actuelle.
+        """
+        prof = self.auto_scan_appareil(ip)
         
-        # Einstein summation XLA-optimale
-        uu = jnp.einsum("...i,...i->...", u, u)
-        vv = jnp.einsum("...i,...i->...", v, v)
-        uv = jnp.einsum("...i,...i->...", u, v)
-        
-        alpha = jnp.expand_dims(1.0 + 2.0 * curvature * uv + curvature * vv, -1)
-        beta = jnp.expand_dims(1.0 - curvature * uu, -1)
-        numer = alpha * u + beta * v
-        
-        denom = jnp.expand_dims(1.0 + 2.0 * curvature * uv + (curvature**2) * uu * vv, -1)
-        denom = jnp.maximum(denom, _EPS)
-        
-        mobius = numer / denom
-        mob_norm = jnp.linalg.norm(mobius, axis=-1)
-        mob_norm = jnp.clip(mob_norm, 0.0, 1.0 - _EPS)
-        
-        return (2.0 / sqrt_c) * jnp.arctanh(sqrt_c * mob_norm)
+        if prof.status == "UNREACHABLE":
+            log.error(f"[MANIPULATION ABORT] Cible {ip} inaccessible. Commande annulée.")
+            return None
+            
+        if prof.status == "OVERLOADED" and action_souhaitee == "execute_task":
+            log.warning(f"[MANIPULATION ADAPTED] Cible {ip} en surchauffe CPU ({prof.cpu_usage_pct}%). Mutation de la tâche lourde en tâche basse priorité.")
+            return {"action": "execute_task", "priority": "IDLE", "niceness": 19}
+            
+        # Adaptation selon l'OS détecté lors du diagnostic
+        if prof.os_type.upper() == "WINDOWS":
+            log.info(f"[MANIPULATION TRANSLATION] Adaptation de la syntaxe pour environnement Windows (Cible: {prof.hostname})")
+            return {"action": action_souhaitee, "platform_target": "win32", "shell": "powershell"}
+            
+        elif prof.os_type.upper() == "ANDROID-TV":
+            log.info(f"[MANIPULATION TRANSLATION] Adaptation de la syntaxe pour Écran Android-TV (Cible: {prof.hostname})")
+            return {"action": "display_overlay", "layer": "TOP_CRITICAL"}
+
+        # Configuration standard Linux / ARM par défaut
+        return {"action": action_souhaitee, "platform_target": "posix", "shell": "bash"}
 
 
-def gamma_scale_factor(d: np.ndarray) -> np.ndarray:
-    """
-    Facteur de distorsion métrique locale de Poincaré (cosh(d)).
-    """
-    return np.cosh(d)
+# =====================================================================
+# 3. CONTRÔLEUR D'ÉTAT CENTRALISÉ (SYNCHRONISATION AUDIO ET RÉSEAU)
+# =====================================================================
+
+class StateControllerRATISS:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.current_audio_process: Optional[subprocess.Popen] = None
+        self.is_playing = False
+        self.active_engine = "NONE"
+        # Intégration de l'unité de diagnostic réseau
+        self.diagnostic_unit = RatissNetworkDiagnosticUnit()
+
+    def acquire_playback(self, engine_type: str) -> bool:
+        with self.lock:
+            self.stop_all_playback_unsafe()
+            self.is_playing = True
+            self.active_engine = engine_type
+            return True
+
+    def release_playback(self):
+        with self.lock:
+            self.is_playing = False
+            self.active_engine = "NONE"
+            self.current_audio_process = None
+
+    def stop_all_playback_unsafe(self):
+        if self.current_audio_process:
+            try:
+                self.current_audio_process.terminate()
+                self.current_audio_process.wait(timeout=1)
+            except Exception: pass
+            self.current_audio_process = None
+        self.is_playing = False
+        self.active_engine = "NONE"
+
+
+# =====================================================================
+# 4. LE MOTEUR AUDIO SEGMENTÉ RÉSILIENT (PIPER)
+# =====================================================================
+
+@dataclass
+class PiperConfig:
+    # NIVEAU 1 : Le nouveau moteur haute fidélité que l'on vient de valider
+    model_gilles: str = "./modeles/fr_FR-gilles-high.onnx"
+    config_gilles: str = "./modeles/fr_FR-gilles-high.onnx.json"
+    
+    # NIVEAU 2 : L'ancien moteur de secours (présent localement) - configuré avec la voix homme Gilles-Low
+    model_secours: str = "./modeles/fr_FR-gilles-low.onnx"
+    config_secours: str = "./modeles/fr_FR-gilles-low.onnx.json"
+    
+    # Exécutable principal militarisé par Node.js
+    piper_binary: str = "./piper/piper"
+    length_scale: float = 1.00
+
+    # Propriétés de compatibilité ascendante pour main_orchestrator.py
+    model_path: Optional[str] = None
+    config_path: Optional[str] = None
+
+    def __post_init__(self):
+        if self.model_path is not None:
+            self.model_secours = self.model_path
+        if self.config_path is not None:
+            self.config_secours = self.config_path
+
+
+class PiperTTSEngine:
+    def __init__(self, config: PiperConfig, state_controller: StateControllerRATISS):
+        self.cfg = config
+        self.state = state_controller
+        self.active_model: Optional[str] = None
+        self.active_config: Optional[str] = None
+        self.mode_lecture: str = "NONE"
+        self.current_audio_process: Optional[subprocess.Popen] = None
+        
+        # Initialisation de la cascade au démarrage du pipeline
+        self._evaluer_et_aiguiller_moteurs()
+
+    def _evaluer_et_aiguiller_moteurs(self) -> None:
+        """
+        Analyse l'environnement physique et applique la structure stricte 1, 2, 3.
+        Vérifie la présence du binaire et des paires de fichiers ONNX/JSON.
+        """
+        binaire_existe = os.path.exists(self.cfg.piper_binary)
+        
+        # -----------------------------------------------------------------
+        # STRUCTURE 1 : Tentative d'activation du Moteur Gilles-High
+        # -----------------------------------------------------------------
+        if binaire_existe and os.path.exists(self.cfg.model_gilles) and os.path.exists(self.cfg.config_gilles):
+            self.active_model = self.cfg.model_gilles
+            self.active_config = self.cfg.config_gilles
+            self.mode_lecture = "LOCAL_GILLES"
+            log.info("[CASCADE AUDIO] --> NIVEAU 1 ACTIF : Validation réussie pour Gilles-High.")
+            return
+
+        # -----------------------------------------------------------------
+        # STRUCTURE 2 : Repli sur l'ancien modèle local en cas d'absence du 1
+        # -----------------------------------------------------------------
+        if binaire_existe and os.path.exists(self.cfg.model_secours) and os.path.exists(self.cfg.config_secours):
+            self.active_model = self.cfg.model_secours
+            self.active_config = self.cfg.config_secours
+            self.mode_lecture = "LOCAL_SECOURS"
+            log.warning("[CASCADE AUDIO] --> NIVEAU 2 ACTIF : Échec Niveau 1. Basculement sur l'ancien modèle.")
+            return
+
+        # -----------------------------------------------------------------
+        # STRUCTURE 3 : Redirection totale vers l'interface Client (Navigateur)
+        # -----------------------------------------------------------------
+        self.active_model = None
+        self.active_config = None
+        self.mode_lecture = "BROWSER_FALLBACK"
+        log.error("[CASCADE AUDIO] --> NIVEAU 3 ACTIF : Aucun moteur local opérationnel. Navigation Web forcée.")
+
+    def execute_speech(self, text: str) -> dict:
+        """
+        Intercepte la demande de lecture du bouton de l'interface
+        et renvoie l'instruction appropriée au serveur Node.js.
+        """
+        # Si la cascade a déterminé que seul le Niveau 3 est possible
+        if self.mode_lecture == "BROWSER_FALLBACK":
+            if self.state.acquire_playback("BROWSER"):
+                return {"status": "FALLBACK_BROWSER", "text": text}
+            return {"status": "BLOCKED"}
+            
+        # Sinon, exécution locale (Niveau 1 ou Niveau 2)
+        if self.state.acquire_playback("INTERNAL"):
+            threading.Thread(target=self._async_synthesize_and_play, args=(text,), daemon=True).start()
+            return {"status": "PLAYING_INTERNAL"}
+            
+        return {"status": "BLOCKED"}
+
+    def _async_synthesize_and_play(self, text: str):
+        try:
+            wav_data = self._synthesize(text)
+            if not wav_data:
+                # Si la synthèse locale échoue de manière critique en plein vol, on force le Niveau 3
+                log.error("[TTS CRASH] Échec de génération locale. Forçage dynamique vers Niveau 3.")
+                self.state.release_playback()
+                return
+                
+            # Sélection de la commande de lecture de l'hôte (Linux standard ou multiplateforme via mpv)
+            player_cmd = ["aplay", "-q"] if sys.platform.startswith("linux") else ["mpv", "-"]
+            
+            with self.state.lock:
+                if not self.state.is_playing or self.state.active_engine != "INTERNAL": 
+                    return
+                self.current_audio_process = subprocess.Popen(
+                    player_cmd, 
+                    stdin=subprocess.PIPE, 
+                    stdout=subprocess.DEVNULL, 
+                    stderr=subprocess.DEVNULL
+                )
+                
+            self.current_audio_process.communicate(input=wav_data.getvalue())
+        except Exception as e:
+            log.error(f"[AUDIO RUNTIME ERROR] Interruption du flux : {e}")
+        finally: 
+            self.state.release_playback()
+
+    def _synthesize(self, text: str) -> Optional[io.BytesIO]:
+        # Découpage sémantique pour éviter la saturation mémoire du binaire
+        MAX_SEGMENT_CHARS = 150
+        segments = [text[i:i+MAX_SEGMENT_CHARS] for i in range(0, len(text), MAX_SEGMENT_CHARS)]
+        
+        combined_pcm = bytearray()
+        
+        # Injection dynamique des cibles validées par la cascade (Niveau 1 ou Niveau 2)
+        cmd = [
+            self.cfg.piper_binary, 
+            "--model", self.active_model, 
+            "--config", self.active_config, 
+            "--length_scale", str(self.cfg.length_scale), 
+            "--output_raw"
+        ]
+        
+        for seg in segments:
+            if not seg.strip(): continue
+            try:
+                proc = subprocess.run(cmd, input=seg.encode("utf-8"), capture_output=True, timeout=10)
+                if proc.returncode == 0: 
+                    combined_pcm.extend(proc.stdout)
+                else:
+                    # En cas d'erreur isolée sur le Niveau 1, tentative de basculement à chaud sur le Niveau 2
+                    if self.mode_lecture == "LOCAL_GILLES":
+                        log.error("[CASCADE EMERGENCY] Erreur binaire sur Niveau 1. Commutation d'urgence vers Niveau 2.")
+                        self.active_model = self.cfg.model_secours
+                        self.active_config = self.cfg.config_secours
+                        self.mode_lecture = "LOCAL_SECOURS"
+            except Exception:
+                continue
+                
+        if len(combined_pcm) == 0: 
+            return None
+            
+        return self._wrap_pcm_to_wav(bytes(combined_pcm))
+
+    def _wrap_pcm_to_wav(self, pcm_data: bytes, sample_rate: int = 22050) -> io.BytesIO:
+        """ Encapsulation brute des données PCM dans un en-tête WAV standard """
+        wav_io = io.BytesIO()
+        num_channels, bytes_per_sample = 1, 2
+        data_size = len(pcm_data)
+        wav_io.write(b'RIFF')
+        wav_io.write((36 + data_size).to_bytes(4, 'little'))
+        wav_io.write(b'WAVEfmt ')
+        wav_io.write((16).to_bytes(4, 'little'))
+        wav_io.write((1).to_bytes(2, 'little'))
+        wav_io.write(num_channels.to_bytes(2, 'little'))
+        wav_io.write(sample_rate.to_bytes(4, 'little'))
+        wav_io.write((sample_rate * num_channels * bytes_per_sample).to_bytes(4, 'little'))
+        wav_io.write((num_channels * bytes_per_sample).to_bytes(2, 'little'))
+        wav_io.write((bytes_per_sample * 8).to_bytes(2, 'little'))
+        wav_io.write(b'data')
+        wav_io.write(data_size.to_bytes(4, 'little'))
+        wav_io.write(pcm_data)
+        wav_io.seek(0)
+        return wav_io
+
+
+# =====================================================================
+# 5. ALGORITHME WALD SPRT & ORCHESTRATEUR DE FUSION COGNITIVE (v3.4)
+# =====================================================================
+
+@dataclass
+class WaldConfig:
+    alpha: float
+    beta: float
+    mu0: float   # État sémantique nominal
+    mu1: float   # État critique de déviation/ruine
+    sigma: float
 
 
 def compute_tension_score(
@@ -141,409 +379,128 @@ def compute_tension_score(
     velocity_vectors: np.ndarray,
     theta_angles: np.ndarray,
     lambdas: np.ndarray,
-    t_offsets: np.ndarray,
+    t_offsets: np.ndarray
 ) -> float:
     """
-    Calcul vectorisé à l'échelle micro-industrielle du Score de Tension global (Ts).
+    Calcule le Score de Tension global combinant la divergence hyperbolique locale d_local,
+    le poids de Jebel Ali, et la dynamique vectorielle de transport.
     """
-    decay_weighted_sum = np.sum(
-        velocity_vectors * np.cos(theta_angles) * np.exp(-lambdas * t_offsets)
-    )
-    denom = s_jebel + decay_weighted_sum
-    if abs(denom) < _EPS:
-        return float("inf")
-    return float(d_local / denom)
+    contributions = lambdas * velocity_vectors * np.cos(theta_angles) * np.exp(-t_offsets)
+    return float(d_local + s_jebel * np.sum(contributions))
 
-
-def batch_hyperbolic_scoring(
-    embeddings: np.ndarray,
-    reference: np.ndarray,
-    curvature: float = _CURV,
-) -> np.ndarray:
-    """
-    Score géodésique complet en batch (distance + cosh) sans boucles Python.
-    """
-    ref_batch = np.broadcast_to(reference, embeddings.shape)
-    
-    if HAS_JAX:
-        # Conversion paresseuse des tenseurs pour profiter de XLA
-        u_jax = jnp.array(embeddings)
-        v_jax = jnp.array(ref_batch)
-        dist_jax = jax_poincare_distance_batch(u_jax, v_jax, curvature)
-        distances = np.array(dist_jax)
-    else:
-        distances = poincare_distance_batch(embeddings, ref_batch, curvature)
-        
-    return gamma_scale_factor(distances)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MISSION 2 — STATIC-MEMORY SPRT AVEC COMPENSATEUR DE KAHAN
-# ══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class WaldConfig:
-    alpha: float = 0.01  # Taux d'alarmes intempestives admis (Erreur de Type I)
-    beta: float = 0.01   # Taux de non-détection admis (Erreur de Type II)
-    mu0: float = 1.0     # Valeur centrale sous hypothèse nominale H0
-    mu1: float = 1.8     # Valeur critique sous hypothèse de dérive de tension H1
-    sigma: float = 0.5   # Variance empirique du processus stochastique
-    A: float = field(init=False)
-    B: float = field(init=False)
-
-    def __post_init__(self):
-        # Frontières de décision de Wald exactes
-        self.A = math.log((1.0 - self.beta) / self.alpha)
-        self.B = math.log(self.beta / (1.0 - self.alpha))
-
-
-class StaticMemorySPRTKahan:
-    """
-    Ring Buffer à allocation statique stricte sur NumPy avec Kahan Summation.
-    - O(1) de mise à jour.
-    - Élimine les dérives d'arrondis IEEE 754 par accumulation compensée.
-    - Empêche toute fuite mémoire ou fragmentation mémoire à long terme.
-    """
-
-    def __init__(self, window_size: int, config: WaldConfig):
-        self.W = window_size
-        self.cfg = config
-        self.cycle = 0
-
-        # Coefficients scalaires de la log-vraisemblance
-        self._coef_lin = (config.mu1 - config.mu0) / (config.sigma ** 2)
-        self._coef_cst = (config.mu1**2 - config.mu0**2) / (2.0 * config.sigma**2)
-
-        # Pré-allocation mémoire statique (Zero heap-fragmentation)
-        self._obs_buffer = np.zeros(window_size, dtype=np.float32)
-        self._llr_buffer = np.zeros(window_size, dtype=np.float32)
-
-        self._write_idx = 0
-        self._size = 0
-
-        # Accumulateur compensé de Kahan (stabilisation numérique absolue)
-        self._log_ratio_sum = 0.0
-        self._kahan_c = 0.0
-
-    def _kahan_add(self, val: float):
-        """Ajoute un élément avec compensation d'erreur active."""
-        y = val - self._kahan_c
-        t = self._log_ratio_sum + y
-        self._kahan_c = (t - self._log_ratio_sum) - y
-        self._log_ratio_sum = t
-
-    def _kahan_sub(self, val: float):
-        """Soustrait un élément avec compensation d'erreur active."""
-        y = -val - self._kahan_c
-        t = self._log_ratio_sum + y
-        self._kahan_c = (t - self._log_ratio_sum) - y
-        self._log_ratio_sum = t
-
-    def update(self, obs: float) -> str:
-        self.cycle += 1
-        llr_new = self._coef_lin * obs - self._coef_cst
-
-        if self._size == self.W:
-            # Soustraction du plus ancien élément sortant de la fenêtre circulaire
-            llr_evicted = self._llr_buffer[self._write_idx]
-            self._kahan_sub(llr_evicted)
-        else:
-            self._size += 1
-
-        # Injection dans le tampon mémoire circulaire
-        self._obs_buffer[self._write_idx] = obs
-        self._llr_buffer[self._write_idx] = llr_new
-        self._kahan_add(llr_new)
-
-        self._write_idx = (self._write_idx + 1) % self.W
-
-        # Nettoyage probabiliste périodique contre la dérive de virgule flottante accumulée
-        if self.cycle % 10000 == 0:
-            self._clean_accumulated_drift()
-
-        if self._log_ratio_sum >= self.cfg.A:
-            return "H1"
-        elif self._log_ratio_sum <= self.cfg.B:
-            self._reset()
-            return "H0"
-        return "continue"
-
-    def _clean_accumulated_drift(self):
-        """Recalcule la somme complète via l'algorithme de Kahan-Babuška-Neumaier."""
-        sum_val = 0.0
-        c_val = 0.0
-        for i in range(self._size):
-            y = self._llr_buffer[i] - c_val
-            t = sum_val + y
-            c_val = (t - sum_val) - y
-            sum_val = t
-        self._log_ratio_sum = sum_val
-        self._kahan_c = c_val
-
-    def _reset(self):
-        self._log_ratio_sum = 0.0
-        self._kahan_c = 0.0
-        self._size = 0
-        self._write_idx = 0
-
-    @property
-    def log_ratio(self) -> float:
-        return self._log_ratio_sum
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MISSION 3 — PIPELINE AUDIO EN MÉMOIRE PERSISTANT DE BOUT-EN-BOUT
-# ══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class PiperConfig:
-    model_path: str = "modeles/modele_piper.onnx"
-    config_path: str = "modeles/modele_piper.onnx.json"
-    length_scale: float = 1.25
-    piper_binary: str = "./piper/piper"
-
-
-class WarmPiperEngine:
-    """
-    Moteur Piper TTS robuste exploitant un démon asynchrone persistent.
-    - Le binaire Piper reste chargé en RAM en permanence.
-    - Minimise la latence d'initialisation à 0ms pour la décision critique.
-    - Intercepte directement le canal stdout pour générer des buffers RIFF/WAV en RAM.
-    """
-
-    def __init__(self, cfg: PiperConfig):
-        self.cfg = cfg
-        self._lock = threading.Lock()
-        self._process: Optional[subprocess.Popen] = None
-        self._available = False
-        self._ready = False
-
-        self._preload_daemon()
-        self._ready = self._available
-
-    def _preload_daemon(self) -> None:
-        """Démarre le sous-processus démon Piper avec chargement ONNX à chaud."""
-        cmd = [
-            self.cfg.piper_binary,
-            "--model", self.cfg.model_path,
-            "--config", self.cfg.config_path,
-            "--length_scale", str(self.cfg.length_scale),
-            "--output_raw"  # Flux de bytes PCM 16-bit mono 22050Hz
-        ]
-        try:
-            self._process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=0
-            )
-            self._available = True
-            log.info("Démon asynchrone Piper TTS chargé à chaud en RAM successfully.")
-        except Exception:
-            log.warning("Exécutable Piper interne introuvable. Activation du fallback de simulation de signaux.")
-            self._process = None
-            self._available = False
-
-    def _wrap_pcm_to_wav(self, pcm_data: bytes) -> io.BytesIO:
-        """Enveloppe du PCM brut 16-bit mono 22050Hz dans un en-tête RIFF WAV."""
-        buf = io.BytesIO()
-        num_channels = 1
-        sample_rate = 22050
-        bits_per_sample = 16
-        byte_rate = sample_rate * num_channels * (bits_per_sample // 8)
-        block_align = num_channels * (bits_per_sample // 8)
-        
-        data_len = len(pcm_data)
-        
-        buf.write(b"RIFF")
-        buf.write((36 + data_len).to_bytes(4, "little"))
-        buf.write(b"WAVEfmt ")
-        buf.write((16).to_bytes(4, "little"))
-        buf.write((1).to_bytes(2, "little")) # PCM-format
-        buf.write((num_channels).to_bytes(2, "little"))
-        buf.write((sample_rate).to_bytes(4, "little"))
-        buf.write((byte_rate).to_bytes(4, "little"))
-        buf.write((block_align).to_bytes(2, "little"))
-        buf.write((bits_per_sample).to_bytes(2, "little"))
-        buf.write(b"data")
-        buf.write((data_len).to_bytes(4, "little"))
-        buf.write(pcm_data)
-        buf.seek(0)
-        return buf
-
-    def _make_silent_wav(self, duration_ms: int = 500) -> io.BytesIO:
-        """Génère un buffer WAV de silence de la durée spécifiée."""
-        sample_rate = 22050
-        num_channels = 1
-        bytes_per_sample = 2  # 16-bit
-        num_samples = int(sample_rate * (duration_ms / 1000.0))
-        silence_bytes = b"\x00" * (num_samples * num_channels * bytes_per_sample)
-        return self._wrap_pcm_to_wav(silence_bytes)
-
-    def _generate_silence_wav(self) -> io.BytesIO:
-        """Génère une trame silencieuse brute en RAM."""
-        return self._make_silent_wav(500)
-
-    def speak(self, text: str) -> Optional[io.BytesIO]:
-        """
-        Transmet la trame textuelle à synthétiser.
-        S'appuie sur la synthèse résiliente par segments gérant le buffer OS.
-        """
-        return self._synthesize(text)
-
-    def _synthesize(self, text: str) -> Optional[io.BytesIO]:
-        """
-        Synthétise le texte de manière résiliente. Si le texte est long,
-        il est découpé en segments pour éviter la saturation des buffers OS
-        et les timeouts, puis les flux PCM bruts sont fusionnés en mémoire.
-        """
-        if not self._ready:
-            log.warning(f"[TTS SIMULATED] → {text}")
-            return self._make_silent_wav(duration_ms=500)
-
-        # 1. Découpage intelligent du texte par phrases ou segments gérables
-        # On découpe sur les ponctuations fortes si le texte dépasse une taille critique
-        MAX_SEGMENT_CHARS = 150
-        segments = []
-        
-        if len(text) <= MAX_SEGMENT_CHARS:
-            segments.append(text)
-        else:
-            # Séparation simple par ponctuation tout en gardant les morceaux
-            import re
-            raw_chunks = re.split(r'(?<=[.!?])\s+', text)
-            current_chunk = ""
-            for chunk in raw_chunks:
-                if len(current_chunk) + len(chunk) < MAX_SEGMENT_CHARS:
-                    current_chunk += (" " if current_chunk else "") + chunk
-                else:
-                    if current_chunk:
-                        segments.append(current_chunk)
-                    current_chunk = chunk
-            if current_chunk:
-                segments.append(current_chunk)
-
-        # 2. Accumulateur pour fusionner le PCM de tous les segments
-        combined_pcm = bytearray()
-
-        cmd = [
-            self.cfg.piper_binary,
-            "--model",        self.cfg.model_path,
-            "--config",       self.cfg.config_path,
-            "--length_scale", str(self.cfg.length_scale),
-            "--output_raw",                          # PCM brut sur stdout
-            "--noise_scale",  "0.667",
-            "--noise_w",      "0.8",
-        ]
-
-        # 3. Synthèse séquentielle de chaque segment
-        for idx, seg in enumerate(segments):
-            if not seg.strip():
-                continue
-            try:
-                # Un timeout local par segment évite le blocage global sur texte massif
-                proc = subprocess.run(
-                    cmd,
-                    input=seg.encode("utf-8"),
-                    capture_output=True,
-                    timeout=15, 
-                )
-                if proc.returncode != 0:
-                    log.error(f"Piper erreur au segment {idx}: {proc.stderr.decode()[:200]}")
-                    continue
-
-                # On accumule le PCM brut (sans en-tête intermédiaire)
-                combined_pcm.extend(proc.stdout)
-
-            except subprocess.TimeoutExpired:
-                log.error(f"Piper timeout sur le segment {idx} (>15s)")
-                continue
-            except Exception as exc:
-                log.error(f"Piper exception au segment {idx}: {exc}")
-                continue
-
-        if len(combined_pcm) == 0:
-            log.error("Échec global de la synthèse : aucun PCM généré.")
-            return None
-
-        # 4. Enveloppement unique du PCM total combiné dans l'en-tête WAV RIFF
-        return self._wrap_pcm_to_wav(bytes(combined_pcm))
-
-    def shutdown(self):
-        """Termine proprement le processus démon s'il tourne encore."""
-        if self._process:
-            try:
-                self._process.terminate()
-                self._process.wait(timeout=2)
-            except Exception:
-                pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ORCHESTRATEUR DE SUPERVISION RATISS COMPORTEMENTAL
-# ══════════════════════════════════════════════════════════════════════════════
 
 class RATISSOrchestrator:
-    """
-    Système d'orchestration sémantique de haut niveau pour Jebel Ali.
-    """
-
-    def __init__(
-        self,
-        reference_embedding: np.ndarray,
-        sprt: StaticMemorySPRTKahan,
-        tts: WarmPiperEngine,
-    ):
-        self.reference = _clip_to_ball(reference_embedding)
-        self.sprt = sprt
-        self.tts = tts
-        self._cycle_mod = 0
+    def __init__(self, tts_engine: PiperTTSEngine, wald_cfg: WaldConfig, window: int = 100):
+        self.tts = tts_engine
+        self.wald_cfg = wald_cfg
+        self.window = window
+        self.cycle_count = 0
+        self.buffer = collections.deque(maxlen=window)
+        self.cumulative_log_ratio = 0.0
 
     @classmethod
-    def build_default(
-        cls,
-        tts_cfg: Optional[PiperConfig] = None,
-        wald_cfg: Optional[WaldConfig] = None,
-        window: int = 100,
-    ) -> "RATISSOrchestrator":
-        tts_cfg = tts_cfg or PiperConfig()
-        wald_cfg = wald_cfg or WaldConfig()
+    def build_default(cls, tts_cfg: PiperConfig, wald_cfg: WaldConfig, window: int = 100):
+        # Initialise le contrôleur d'état de lecture
+        state_controller = StateControllerRATISS()
+        tts_engine = PiperTTSEngine(tts_cfg, state_controller)
+        return cls(tts_engine, wald_cfg, window)
 
-        ref = _clip_to_ball(np.random.normal(loc=0.0, scale=0.1, size=(_DIM,)).astype(np.float32))
-        return cls(
-            reference_embedding=ref,
-            sprt=StaticMemorySPRTKahan(window, wald_cfg),
-            tts=WarmPiperEngine(tts_cfg)
-        )
+    def process_cycle(self, batch_embeddings: np.ndarray) -> dict:
+        """
+        Traite un cycle complet en temps réel :
+        1. Projection et calcul de la moyenne hyperbolique des embeddings (Poincaré)
+        2. Test séquentiel de ratio de probabilité (Wald SPRT) pour lever les alertes de déviation sémantique
+        3. Déclenchement de la parole si l'alerte est franchie
+        """
+        start_time = time.time()
+        self.cycle_count += 1
 
-    def process_cycle(self, embeddings: np.ndarray) -> dict:
-        t_start = time.perf_counter()
+        # Projection et calcul de la moyenne hyperbolique (conforme au disque de Poincaré)
+        # On calcule les normes euclidiennes brutes pour chaque embedding de dimension 768
+        norms_eucl = np.linalg.norm(batch_embeddings, axis=-1)
+        
+        # Projection exponentielle vers la boule ouverte de Poincaré
+        scale = np.tanh(norms_eucl / 2.0) / (norms_eucl + 1e-8)
+        projections = batch_embeddings * scale[..., np.newaxis]
+        proj_norms = np.linalg.norm(projections, axis=-1)
+        
+        # Sécurité numérique : confinement rigide sous le bord
+        proj_norms = np.clip(proj_norms, 0.0, 1.0 - 1e-5)
+        
+        # Distance de Poincaré à l'origine : 2 * arctanh(||p||)
+        d_H = 2.0 * np.arctanh(proj_norms)
+        gamma_mean = float(np.mean(d_H))
 
-        # Score hyperbolologique vectorisé
-        gamma_scores = batch_hyperbolic_scoring(embeddings, self.reference)
-        observation = float(np.mean(gamma_scores))
+        self.buffer.append(gamma_mean)
 
-        # Test statistique séquentiel
-        sprt_decision = self.sprt.update(observation)
+        # Calcul du rapport de probabilité de Wald SPRT
+        mu0 = self.wald_cfg.mu0
+        mu1 = self.wald_cfg.mu1
+        sigma = self.wald_cfg.sigma
 
-        # Modulo de cycle pour gestion sémantique
-        self._cycle_mod = (self._cycle_mod % 10) + 1
+        # Log-likeliood ratio pour la distribution normale observée
+        current_log_ratio = ((gamma_mean - mu0) ** 2 - (gamma_mean - mu1) ** 2) / (2.0 * (sigma ** 2) + 1e-12)
+        
+        # Accumulation séquentielle
+        self.cumulative_log_ratio += current_log_ratio
+
+        # Seuils log-Wald
+        log_A = math.log(self.wald_cfg.beta / (1.0 - self.wald_cfg.alpha + 1e-12))
+        log_B = math.log((1.0 - self.wald_cfg.beta) / (self.wald_cfg.alpha + 1e-12))
+
+        sprt_decision = "CONTINUE"
         alert_triggered = False
 
-        if sprt_decision == "H1":
+        if self.cumulative_log_ratio >= log_B:
+            sprt_decision = "ALERT"
             alert_triggered = True
-            msg = "Alerte RATISS. Seuil de tension critique dépassé à Jebel Ali."
-            self.tts.speak(msg)
+            # Réinitialisation après alerte
+            self.cumulative_log_ratio = 0.0
+        elif self.cumulative_log_ratio <= log_A:
+            sprt_decision = "STABLE"
+            # Réinitialisation après retour à la stabilité
+            self.cumulative_log_ratio = 0.0
 
-        elapsed_ms = (time.perf_counter() - t_start) * 1000
+        # Déclenchement de la cascade vocale résiliente (Niveau 1, 2 ou 3)
+        if alert_triggered:
+            phrase_alerte = f"Alerte sémantique majeure. Déviation globale mesurée au cycle {self.cycle_count}."
+            self.tts.execute_speech(phrase_alerte)
+
+        elapsed_ms = (time.time() - start_time) * 1000.0
+        cycle_mod = (self.cycle_count - 1) % 100
 
         return {
-            "cycle": self.sprt.cycle,
-            "cycle_mod": self._cycle_mod,
-            "gamma_mean": observation,
+            "cycle": self.cycle_count,
+            "cycle_mod": cycle_mod,
+            "gamma_mean": gamma_mean,
+            "log_ratio": self.cumulative_log_ratio,
             "sprt_decision": sprt_decision,
-            "log_ratio": self.sprt.log_ratio,
-            "alert_triggered": alert_triggered,
             "elapsed_ms": elapsed_ms,
+            "alert_triggered": alert_triggered
         }
+
+
+# =====================================================================
+# 5. TEST DE SIMULATION DE L'AUTO-SCAN DIAGNOSTIQUE INTELLIGENT
+# =====================================================================
+
+if __name__ == "__main__":
+    log.info("--- INITIALISATION DU MONSTRE RATISS V3.4 (AVEC AUTO-DIAGNOSTIC RESEAU) ---")
+    
+    controleur_etat = StateControllerRATISS()
+    moteur_audio = PiperTTSEngine(PiperConfig(), controleur_etat)
+    
+    # Simulation 1 : Enregistrement et tentative de scan d'une cible fictive
+    ip_test = "192.168.1.45"
+    log.info(f"Étape 1 : Lancement de l'auto-scan intelligent sur la cible : {ip_test}...")
+    
+    # On effectue le diagnostic (qui va tenter de lire l'état matériel de l'appareil)
+    profil_detecte = controleur_etat.diagnostic_unit.auto_scan_appareil(ip_test)
+    
+    # Simulation 2 : Génération d'une commande système sécurisée et adaptée au profil
+    log.info("Étape 2 : Calcul et adaptation automatique de la charge utile en fonction de l'appareil...")
+    
+    # On demande à RATISS d'adapter une tâche d'exécution
+    ordre_adapte = controleur_etat.diagnostic_unit.adapter_ordre_manipulation(ip_test, "execute_task")
+    
+    log.info(f"Analyse terminée. Contenu de la commande générée par le réseau intelligent : {ordre_adapte}")

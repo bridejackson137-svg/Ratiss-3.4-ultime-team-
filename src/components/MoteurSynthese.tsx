@@ -29,7 +29,8 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
   useEffect(() => {
     const handleGlobalSpeechStop = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail && detail.sourceId !== activeSpeechIdRef.current) {
+      // Arrêter tout si sourceId est null (via __ratissStopAllSpeech) ou si différent
+      if (detail && (detail.sourceId === null || detail.sourceId !== activeSpeechIdRef.current)) {
         if (activeSpeechCancelRef.current) {
           activeSpeechCancelRef.current();
           activeSpeechCancelRef.current = null;
@@ -104,55 +105,45 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
     }
   };
 
-  const handleTTS = (item: ConceptExtended) => {
-    // Si l'objet cliqué est déjà en cours de lecture, on l'arrête inconditionnellement
+  const handleTTS = async (item: ConceptExtended) => {
+    // Si l'objet cliqué est déjà en cours de lecture, on l'arrête
     if (activeSpeechId === item.id) {
-      if (activeSpeechCancelRef.current) {
-        activeSpeechCancelRef.current();
-        activeSpeechCancelRef.current = null;
-      }
-      setActiveSpeechId(null);
-      setIsSpeechPaused(false);
-      return;
+       if (activeSpeechCancelRef.current) {
+          activeSpeechCancelRef.current();
+          activeSpeechCancelRef.current = null;
+       }
+       setActiveSpeechId(null);
+       setIsSpeechPaused(false);
+       return;
     }
 
-    // Arrêter toute lecture active globale avant d'en lancer une nouvelle
-    if ((window as any).__activeAudio) {
-      try {
-        (window as any).__activeAudio.pause();
-        (window as any).__activeAudio.src = "";
-      } catch (e) {}
-      (window as any).__activeAudio = null;
+    // Arrêter toute lecture active globale
+    if ((window as any).__ratissStopAllSpeech) {
+      (window as any).__ratissStopAllSpeech();
     }
-    if (activeSpeechCancelRef.current) {
-      activeSpeechCancelRef.current();
-      activeSpeechCancelRef.current = null;
-    }
-    setIsSpeechPaused(false);
-
-    // Déclencher l'événement d'arrêt global pour synchroniser les autres composants
     window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: item.id } }));
 
-    // Compilation textuelle (Titre + Logique + Application)
+    // Compilation textuelle
     const rawText = `${item.titre}. ${item.logique}. Application : ${item.application}`;
     const cleanedText = calibrerEtEpurerTexte(rawText, vecteurRecherche);
+    setActiveSpeechId(item.id);
+    setIsSpeechPaused(false);
 
-    // Encodage
     const encodedText = encodeURIComponent(cleanedText);
     const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
 
     const audio = new Audio(audioUrl);
     audioRef.current = audio;
     (window as any).__activeAudio = audio;
-    setActiveSpeechId(item.id);
-    setIsSpeechPaused(false);
 
     let cancelled = false;
+    let localAudioSuccess = false;
+
     activeSpeechCancelRef.current = () => {
       cancelled = true;
       try {
         audio.pause();
-        audio.src = ""; // Coupe instantanément le chargement réseau
+        audio.src = "";
       } catch (e) {}
       window.speechSynthesis.cancel();
       if ((window as any).__activeAudio === audio) {
@@ -161,14 +152,31 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
       setIsSpeechPaused(false);
     };
 
-    audio.play().catch(err => {
-      if (cancelled) return;
-      if (err.name === 'AbortError') {
-        return;
+    audio.onplay = () => {
+      localAudioSuccess = true;
+    };
+    audio.onplaying = () => {
+      localAudioSuccess = true;
+    };
+    audio.ontimeupdate = () => {
+      if (audio.currentTime > 0) {
+        localAudioSuccess = true;
       }
-      console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
-      activerVoixNavigateur();
-    });
+    };
+
+    audio.play()
+      .then(() => {
+        localAudioSuccess = true;
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err.name === 'AbortError') {
+          return;
+        }
+        if (localAudioSuccess || audio.currentTime > 0) return;
+        console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+        activerVoixNavigateur(cleanedText);
+      });
 
     audio.onended = () => {
       if (cancelled) return;
@@ -181,8 +189,12 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
 
     audio.onerror = () => {
       if (cancelled) return;
+      if (localAudioSuccess || audio.currentTime > 0) {
+        // Ignorer les erreurs non-fatales de fin de de flux WAV pour éviter le redoublement
+        return;
+      }
       console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
-      activerVoixNavigateur();
+      activerVoixNavigateur(cleanedText);
     };
 
     const activerCancellationTTS = () => {
@@ -199,16 +211,29 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
     };
     activeSpeechCancelRef.current = activerCancellationTTS;
 
-    function activerVoixNavigateur() {
+    function activerVoixNavigateur(text: string) {
+      // SÉCURITÉ DE ROTATION : Libérer définitivement l'audio local
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = "";
+        audio.onended = null;
+        audio.onerror = null;
+        audio.onplaying = null;
+        audio.onplay = null;
+        audio.ontimeupdate = null;
+      } catch (e) {}
+
+      let browserCancelled = false;
       try {
         window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(cleanedText);
+        const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = 'fr-FR';
         utterance.rate = 1.05;
         utterance.pitch = 0.85;
 
         utterance.onend = () => {
-          if (cancelled) return;
+          if (browserCancelled) return;
           setActiveSpeechId(null);
           setIsSpeechPaused(false);
           if (activeSpeechCancelRef.current === activerCancellationBrowser) {
@@ -217,7 +242,7 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
         };
 
         utterance.onerror = () => {
-          if (cancelled) return;
+          if (browserCancelled) return;
           setActiveSpeechId(null);
           setIsSpeechPaused(false);
           if (activeSpeechCancelRef.current === activerCancellationBrowser) {
@@ -226,7 +251,7 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
         };
 
         const activerCancellationBrowser = () => {
-          cancelled = true;
+          browserCancelled = true;
           window.speechSynthesis.cancel();
           setIsSpeechPaused(false);
         };
@@ -234,7 +259,7 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
 
         window.speechSynthesis.speak(utterance);
       } catch (synthErr) {
-        if (!cancelled) {
+        if (!browserCancelled) {
           setActiveSpeechId(null);
           setIsSpeechPaused(false);
         }

@@ -46,7 +46,7 @@ export default function App() {
 
   // 3. Initial State for Worlds
   const [worlds, setWorlds] = useState<SimulatedWorld[]>([
-    { id: 'terre', name: 'Terre', gravity: 0.35, speed: 0.45, chaos: 0.15, description: 'Environnement physique de référence stable', colorPalette: { bg: 'neutral-950', primary: 'indigo-500', glow: 'rgba(99,102,241,0.2)' } },
+    { id: 'terre', name: 'Terre', gravity: 0.30, speed: 0.45, chaos: 0.15, description: 'Environnement physique de référence stable', colorPalette: { bg: 'neutral-950', primary: 'indigo-500', glow: 'rgba(99,102,241,0.2)' } },
     { id: 'micro_gravite', name: 'Micro-gravité', gravity: 0.05, speed: 0.25, chaos: 0.20, description: 'Interdépendance faible, flottabilité des clusters', colorPalette: { bg: 'zinc-950', primary: 'blue-500', glow: 'rgba(59,130,246,0.2)' } },
     { id: 'chaos_quantique', name: 'Chaos', gravity: 0.75, speed: 0.90, chaos: 1.00, description: 'Fibrillation constante des repères sémantiques', colorPalette: { bg: 'stone-950', primary: 'red-500', glow: 'rgba(239,68,68,0.2)' } },
     { id: 'vide_absolu', name: 'Vide Absolu', gravity: 0.00, speed: 0.10, chaos: 0.02, description: 'Absence d\'inertie, transfert linéaire pur', colorPalette: { bg: 'slate-950', primary: 'slate-500', glow: 'rgba(100,116,139,0.2)' } },
@@ -219,10 +219,10 @@ export default function App() {
 
   // 7. Console history bootstrap
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([
-    { id: '1', timestamp: '20:01:00', text: '[INFO] Initialisation du simulateur cognitif RATISS v3.4...', type: 'system' },
+    { id: '1', timestamp: '20:01:00', text: '[INFO] Initialisation du simulateur cognitif RATISS 4 FUSION...', type: 'system' },
     { id: '2', timestamp: '20:01:01', text: '[INFO] Cartographie SQL vectorielle à 768 dimensions stabilisée.', type: 'system' },
     { id: '3', timestamp: '20:01:01', text: '[INFO] Connexion au ApiVault de secours établie avec succès.', type: 'system' },
-    { id: '4', timestamp: '20:01:02', text: '[RATISS v3.4 CORE] Noyaux en attente. Introduisez un concept ou sédimentez du jargon : concept(:)jargon', type: 'system' },
+    { id: '4', timestamp: '20:01:02', text: '[RATISS 4 FUSION CORE] Noyaux en attente. Introduisez un concept ou sédimentez du jargon : concept(:)jargon', type: 'system' },
   ]);
 
   const [isPending, setIsPending] = useState(false);
@@ -232,12 +232,22 @@ export default function App() {
   const [lastSedimentedSectorId, setLastSedimentedSectorId] = useState<string | null>(null);
   const [pulseTrigger, setPulseTrigger] = useState<number>(0);
 
-  // Biological microcheck tick simulation loop for fluctuating (+/- 1% background oscillation noise)
+  // Initialize central stop function
   useEffect(() => {
-    const interval = setInterval(() => {
-      setTicker(t => t + 1);
-    }, 125);
-    return () => clearInterval(interval);
+    (window as any).__ratissStopAllSpeech = () => {
+      // 1. Stop Speech Synthesis
+      window.speechSynthesis.cancel();
+      // 2. Stop Global Audio
+      if ((window as any).__activeAudio) {
+        try {
+          (window as any).__activeAudio.pause();
+          (window as any).__activeAudio.src = "";
+        } catch (e) {}
+        (window as any).__activeAudio = null;
+      }
+      // 3. Dispatch global stop event
+      window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: null } }));
+    };
   }, []);
 
   // Compute actual oscillated displayed neuromodulators (+/- 1% noise) around target base neuromodulators.
@@ -596,7 +606,7 @@ export default function App() {
 ${resData.logique}
 
 ⚙️ APPLICATION INSTANTANÉE (2026) :
-${resData.application} (Déploiement via infra RATISS v3.4).
+${resData.application} (Déploiement via infra RATISS 4 FUSION).
 `.trim();
 
               await supabase.from('LABO_EMERGENCE').insert([{
@@ -1001,7 +1011,7 @@ ${resData.application} (Déploiement via infra RATISS v3.4).
           </div>
           <div className="text-left font-mono">
             <h1 className="text-md sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
-              SIMULATEUR COGNITIF RATISS <span className="text-[10px] bg-indigo-900/60 text-indigo-300 font-bold px-1.5 py-0.5 rounded border border-indigo-800">v3.4_768D</span>
+              SIMULATEUR COGNITIF RATISS <span className="text-[10px] bg-indigo-900/60 text-indigo-300 font-bold px-1.5 py-0.5 rounded border border-indigo-800">4 FUSION_768D</span>
             </h1>
             <p className="text-[10px] text-neutral-500 tracking-tight font-medium uppercase">
               Synaptic Topology • Biometric micro-fluctuations & failover security
@@ -1137,7 +1147,7 @@ ${resData.application} (Déploiement via infra RATISS v3.4).
             </div>
 
             <div className="pt-2 border-t border-neutral-900 text-[8px] text-neutral-500 flex justify-between items-center">
-              <span>PILOTAGE TEMPS-RÉEL RATISS v3.4</span>
+              <span>PILOTAGE TEMPS-RÉEL RATISS 4 FUSION</span>
               <span className="text-emerald-500 font-bold uppercase">ENGIN COUPLÉ ACTIF</span>
             </div>
           </div>
@@ -1238,7 +1248,7 @@ ${resData.application} (Déploiement via infra RATISS v3.4).
 
       {/* Regulatory footer info */}
       <footer className="border-t border-neutral-900/60 bg-neutral-950 p-3.5 text-center text-[9px] font-mono text-neutral-600 select-none flex flex-col sm:flex-row items-center justify-between px-6 gap-2">
-        <span>MODE BIO-COGNITIF COORDONNÉ RATISS © v3.4 CORE - ARCHITECTURE INTÉGRALE TEMPS-RÉEL RE-BRANCHÉE</span>
+        <span>MODE BIO-COGNITIF COORDONNÉ RATISS © 4 FUSION CORE - ARCHITECTURE INTÉGRALE TEMPS-RÉEL RE-BRANCHÉE</span>
         <span>LATENCE SYSTEME: 1.1ms | TOPOLOGIE_CONST: 768-D CORE | SECURISÉ SEC_API_KEY</span>
       </footer>
     </div>

@@ -179,7 +179,7 @@ export const BrainVisualizer: React.FC<BrainVisualizerProps> = ({
 
       <div className="absolute top-4 right-4 z-10 font-mono select-none">
         <span className="text-[9px] text-emerald-400 px-2.5 py-1 bg-emerald-950/20 border border-emerald-900/30 rounded-lg flex items-center gap-1.5 font-bold animate-pulse">
-          ⚡ STABILISATION FLUIDE v3.4
+          ⚡ STABILISATION FLUIDE RATISS 4 FUSION
         </span>
       </div>
 

@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { SimulatedWorld } from '../types';
-import { Globe, RefreshCw, Zap, Flame } from 'lucide-react';
+import { Globe, RefreshCw, Zap, Flame, Lock, Unlock } from 'lucide-react';
 
 interface SimulatedWorldsProps {
   worlds: SimulatedWorld[];
@@ -15,9 +15,11 @@ export const SimulatedWorlds: React.FC<SimulatedWorldsProps> = ({
   onSelectWorld,
   onUpdateWorldConstants,
 }) => {
+  const [isLocked, setIsLocked] = useState(true);
   const activeWorld = worlds.find(w => w.id === activeWorldId) || worlds[0];
 
   const handleSliderChange = (key: 'gravity' | 'speed' | 'chaos', val: number) => {
+    if (isLocked) return;
     onUpdateWorldConstants(activeWorldId, { [key]: val });
   };
 
@@ -66,10 +68,16 @@ export const SimulatedWorlds: React.FC<SimulatedWorldsProps> = ({
 
         {/* Gravity Slider */}
         <div className="space-y-1">
-          <div className="flex justify-between text-[10px] text-neutral-400">
+          <div className="flex justify-between text-[10px] text-neutral-400 relative">
             <span className="flex items-center gap-1">
               <RefreshCw size={10} className="text-indigo-400" />
               GRAVITATION SÉMANTIQUE
+              <button 
+                onClick={() => setIsLocked(!isLocked)}
+                className={`ml-2 p-1 rounded-full opacity-50 hover:opacity-100 transition-opacity ${isLocked ? 'text-rose-500' : 'text-emerald-500'}`}
+              >
+                {isLocked ? <Lock size={12} /> : <Unlock size={12} />}
+              </button>
             </span>
             <span className="font-semibold text-neutral-300">{activeWorld.gravity.toFixed(2)} G</span>
           </div>
@@ -79,8 +87,9 @@ export const SimulatedWorlds: React.FC<SimulatedWorldsProps> = ({
             max="1.0"
             step="0.01"
             value={activeWorld.gravity}
+            disabled={isLocked}
             onChange={(e) => handleSliderChange('gravity', parseFloat(e.target.value))}
-            className="w-full accent-indigo-500 h-1 bg-neutral-950 rounded-lg cursor-pointer"
+            className={`w-full h-1 bg-neutral-950 rounded-lg cursor-pointer ${isLocked ? 'opacity-30 cursor-not-allowed' : 'accent-indigo-500'}`}
           />
         </div>
 
@@ -99,8 +108,9 @@ export const SimulatedWorlds: React.FC<SimulatedWorldsProps> = ({
             max="1.0"
             step="0.01"
             value={activeWorld.speed}
+            disabled={isLocked}
             onChange={(e) => handleSliderChange('speed', parseFloat(e.target.value))}
-            className="w-full accent-indigo-500 h-1 bg-neutral-950 rounded-lg cursor-pointer"
+            className={`w-full h-1 bg-neutral-950 rounded-lg cursor-pointer ${isLocked ? 'opacity-30 cursor-not-allowed' : 'accent-indigo-500'}`}
           />
         </div>
 
@@ -119,8 +129,9 @@ export const SimulatedWorlds: React.FC<SimulatedWorldsProps> = ({
             max="1.0"
             step="0.01"
             value={activeWorld.chaos}
+            disabled={isLocked}
             onChange={(e) => handleSliderChange('chaos', parseFloat(e.target.value))}
-            className="w-full accent-rose-500 h-1 bg-neutral-950 rounded-lg cursor-pointer"
+            className={`w-full h-1 bg-neutral-950 rounded-lg cursor-pointer ${isLocked ? 'opacity-30 cursor-not-allowed' : 'accent-rose-500'}`}
           />
         </div>
       </div>

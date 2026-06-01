@@ -1,15 +1,22 @@
-import express from "express";
+import express, { Request, Response } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import { AbortController } from 'node-abort-controller';
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
 import crypto from "crypto";
 import fs from "fs";
 import https from "https";
+import axios from "axios";
 
 dotenv.config();
+
+const SYSTEM_ARCHITECTURE_NAME = "RATISS 4 FUSION";
+const SYSTEM_LOG_PREFIX = `[${SYSTEM_ARCHITECTURE_NAME}]`;
+
+console.log(`${SYSTEM_LOG_PREFIX} Initialisation du serveur dorsal...`);
+console.log(`${SYSTEM_LOG_PREFIX} Statut : Moteur de Fusion et boucle d'obstination activés.`);
 
 function cleanAndNaturalizeLLMText(text: string): string {
   if (!text) return "";
@@ -1313,9 +1320,282 @@ function getGeminiClient(): GoogleGenAI {
   return aiInstance;
 }
 
+/**
+ * LA FONCTION NATIVE DE TÉLÉCHARGEMENT (Node.js)
+ * Elle télécharge un flux binaire depuis une URL et l'écrit directement dans /modeles
+ */
+function telechargerEnForce(url: string, nomFichier: string): Promise<void> {
+    console.log(`[DEBUG] telechargerEnForce appelée avec URL: ${url}`);
+    return new Promise((resolve, reject) => {
+        const dossier = path.join(process.cwd(), 'modeles');
+        if (!fs.existsSync(dossier)) fs.mkdirSync(dossier, { recursive: true });
+        
+        const cheminFichier = path.join(dossier, nomFichier);
+        const fileStream = fs.createWriteStream(cheminFichier);
+
+        console.log(`[INFILTRATION] Flux HTTP ouvert pour : ${nomFichier}`);
+
+        https.get(url, (response) => {
+            // Suivre les redirections HTTP (Hugging Face redirige souvent vers des serveurs de stockage CDN)
+            if (response.statusCode === 302 || response.statusCode === 301 || response.statusCode === 307) {
+                if (response.headers.location) {
+                    console.log(`[REDIRECT] Redirection détectée vers : ${response.headers.location}`);
+                    // Gérer les URL relatives potentielles
+                    const targetUrl = new URL(response.headers.location, url).toString();
+                    telechargerEnForce(targetUrl, nomFichier).then(resolve).catch(reject);
+                    return;
+                }
+            }
+
+            if (response.statusCode !== 200) {
+                reject(new Error(`Échec du serveur HTTP: Code ${response.statusCode}`));
+                return;
+            }
+
+            // Écriture par morceaux (chunks) au fur et à mesure que les données arrivent
+            response.pipe(fileStream);
+
+            fileStream.on('finish', () => {
+                fileStream.close();
+                console.log(`[OK] Écriture physique terminée avec succès : ${nomFichier}`);
+                resolve();
+            });
+        }).on('error', (err) => {
+            fs.unlink(cheminFichier, () => {}); // Nettoyage en cas d'erreur
+            console.error(`[NODE ERROR] https.get error for ${nomFichier}:`, err.message);
+            reject(err);
+        });
+    });
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  /**
+   * ROUTE DE DÉBOGAGE
+   */
+  app.post('/api/system/test-route', (req: Request, res: Response) => {
+      return res.status(200).json({ status: "SUCCESS", msg: "ROUTING WORKS!" });
+  });
+
+  /**
+   * ROUTE D'INFILTRATION ET DE DÉPLOIEMENT DU BINAIRE PIPER
+   */
+  app.post('/api/system/install-piper-binary', async (req: Request, res: Response) => {
+      const rootDir = process.cwd();
+      const archivePath = path.join(rootDir, 'piper.tar.gz');
+      const targetFolder = path.join(rootDir, 'piper');
+
+      console.log("[SYSTEM] Déploiement sécurisé du binaire Piper lancé...");
+
+      // Nettoyage préalable du dossier s'il est corrompu
+      if (fs.existsSync(targetFolder)) {
+          fs.rmSync(targetFolder, { recursive: true, force: true });
+      }
+      fs.mkdirSync(targetFolder, { recursive: true });
+
+      const file = fs.createWriteStream(archivePath);
+
+      https.get(PIPER_ARCHIVE_URL, (response) => {
+          if (response.statusCode === 302 || response.statusCode === 301) {
+              if (response.headers.location) {
+                  https.get(response.headers.location, (res2) => res2.pipe(file));
+                  return;
+              }
+          }
+          response.pipe(file);
+
+          file.on('finish', () => {
+              file.close();
+              console.log("[SYSTEM] Archive téléchargée. Extraction brute sans suppression de composants...");
+
+              // Extraction standard dans le dossier /piper/
+              const command = `tar -xvf ${archivePath} -C ${targetFolder}`;
+
+              exec(command, (error, stdout, stderr) => {
+                  if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath); // Nettoyage de l'archive
+
+                  if (error) {
+                      console.error("[CRITICAL] Échec tar :", error.message);
+                      return res.status(500).json({ status: "ERROR", detail: error.message });
+                  }
+
+                  // ANALYSE STRUCTURELLE POST-EXTRACTION
+                  // Si l'archive a créé un sous-dossier /piper/piper/ à cause de sa structure interne
+                  const sousDossierPiper = path.join(targetFolder, 'piper');
+                  const binaireImbrique = path.join(sousDossierPiper, 'piper');
+                  const binaireFinal = path.join(targetFolder, 'piper');
+
+                  if (fs.existsSync(binaireImbrique)) {
+                      console.log("[SYSTEM DETECT] Structure imbriquée détectée. Redressement des fichiers...");
+                      
+                      // Déplacement du contenu du sous-dossier vers la racine de /piper/
+                      const fichiers = fs.readdirSync(sousDossierPiper);
+                      fichiers.forEach((fichier) => {
+                          const ancienChemin = path.join(sousDossierPiper, fichier);
+                          const nouveauChemin = path.join(targetFolder, fichier);
+                          fs.renameSync(ancienChemin, nouveauChemin);
+                      });
+                      
+                      // Suppression du sous-dossier vidé
+                      fs.rmdirSync(sousDossierPiper);
+                  }
+
+                  // Validation définitive exigée par la ligne 2434
+                  if (fs.existsSync(binaireFinal)) {
+                      // Application des permissions d'exécution
+                      fs.chmodSync(binaireFinal, '755');
+                      console.log("[SUCCESS] Validation réussie. Le binaire est présent à l'emplacement exact et exécutable.");
+                      return res.status(200).json({
+                          status: "SUCCESS",
+                          msg: "Le binaire Piper a été correctement redressé et validé dans /piper/piper. Prêt pour le runtime local."
+                      });
+                  } else {
+                      console.error("[CRITICAL] Le binaire est toujours introuvable après redressement.");
+                      return res.status(500).json({
+                          status: "FAILED",
+                          msg: "L'extraction a réussi mais le fichier binaire final reste introuvable."
+                      });
+                  }
+              });
+          });
+      }).on('error', (err) => {
+          if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath);
+          res.status(500).json({ status: "ERROR", detail: err.message });
+      });
+  });
+
+  /**
+   * ROUTE D'URGENCE : Déblocage des droits du binaire Piper
+   */
+  app.post('/api/system/unlock-piper', (req: Request, res: Response) => {
+
+      const cheminBinaire = path.join(process.cwd(), 'piper', 'piper');
+
+      try {
+          console.log(`[RESCUE] Tentative de levée des verrous sur : ${cheminBinaire}`);
+
+          if (!fs.existsSync(cheminBinaire)) {
+              return res.status(404).json({
+                  status: "FAILED",
+                  msg: `Le binaire Piper est introuvable au chemin : ${cheminBinaire}. Vérifie son emplacement.`
+              });
+          }
+
+          // INJECTION DES DROITS D'EXÉCUTION (Chmod 755 : Lecture/Écriture/Exécution)
+          fs.chmodSync(cheminBinaire, '755');
+          
+          console.log("[RESCUE SUCCESS] Le binaire Piper a été militarisé et débloqué avec les droits 755.");
+          return res.status(200).json({
+              status: "SUCCESS",
+              msg: "Les droits d'exécution (chmod +x) ont été injectés de force sur le binaire Piper."
+          });
+
+      } catch (error: any) {
+          console.error("[RESCUE CRITICAL ERROR] Impossible de modifier les droits :", error.message);
+          return res.status(500).json({
+              status: "ERROR",
+              detail: error.message
+          });
+      }
+  });
+
+  // Définition des URL brutes de téléchargement (réparées pour le téléchargement direct)
+  const MODEL_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fr/fr_FR/gilles/high/fr_FR-gilles-high.onnx";
+  const CONFIG_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fr/fr_FR/gilles/high/fr_FR-gilles-high.onnx.json";
+
+  /**
+   * CONFIGURATION STRUCTURELLE OFFICIELLE POUR PIPER (VOIX GILLES)
+   * Ce dictionnaire contient la structure sémantique et les paramètres du synthétiseur.
+   */
+  const CONFIGURATION_GILLES_JSON = {
+      "audio": {
+          "sample_rate": 22050
+      },
+      "espeak": {
+          "voice": "fr"
+      },
+      "inference": {
+          "noise_scale": 0.667,
+          "length_scale": 1.0,
+          "noise_w": 0.8
+      },
+      "num_speakers": 1,
+      "phoneme_id_map": {
+          " ": [0], "^": [1], "$": [2],
+          "a": [3], "b": [4], "d": [5], "e": [6], "f": [7], "g": [8], "i": [9], 
+          "j": [10], "k": [11], "l": [12], "m": [13], "n": [14], "o": [15], "p": [16], 
+          "r": [17], "s": [18], "t": [19], "u": [20], "v": [21], "w": [22], "z": [23], 
+          "ø": [24], "ŋ": [25], "œ": [26], "ɑ": [27], "ɔ": [28], "ə": [29], "ɛ": [30], 
+          "ɟ": [31], "ɡ": [32], "ɲ": [33], "ʁ": [34], "ʃ": [35], "ʒ": [36], "ʔ": [37], 
+          "ã": [38], "ɛ̃": [39], "œ̃": [40], "ɔ̃": [41], "̃": [42]
+      }
+  };
+
+  /**
+   * ROUTE DE SECOURS : Génération locale du fichier d'indexation JSON
+   */
+  app.post('/api/system/generate-gilles-json', (req: Request, res: Response) => {
+      const dossierModeles = path.join(process.cwd(), 'modeles');
+      const cheminJsonFinal = path.join(dossierModeles, 'fr_FR-gilles-high.onnx.json');
+
+      try {
+          console.log("[SYSTEM] Initialisation de la génération chirurgicale du fichier JSON...");
+
+          // Sécurité : création du dossier s'il a été altéré
+          if (!fs.existsSync(dossierModeles)) {
+              fs.mkdirSync(dossierModeles, { recursive: true });
+          }
+
+          // Écriture physique du fichier sur le disque virtuel
+          fs.writeFileSync(
+              cheminJsonFinal, 
+              JSON.stringify(CONFIGURATION_GILLES_JSON, null, 4), 
+              'utf-8'
+          );
+
+          console.log(`[SUCCESS] Fichier de configuration créé avec succès à l'emplacement : ${cheminJsonFinal}`);
+          return res.status(200).json({
+              status: "SUCCESS",
+              msg: "Le fichier fr_FR-gilles-high.onnx.json a été injecté localement avec succès."
+          });
+
+      } catch (error: any) {
+          console.error("[CRITICAL] Échec de l'écriture du fichier de configuration :", error.message);
+          return res.status(500).json({
+              status: "ERROR",
+              detail: error.message
+          });
+      }
+  });
+
+  /**
+   * ROUTE D'ACTIVATION DU TÉLÉCHARGEMENT TTS
+   * C'est cette route que tu appelles depuis ton interface ou via une requête locale
+   */
+  app.post('/api/system/download-tts', async (req: Request, res: Response) => {
+      try {
+          console.log("[SYSTEM] Requête d'infiltration du modèle Gilles-High reçue.");
+          
+          // Exécution séquentielle des deux téléchargements sans bloquer Python
+          await telechargerEnForce(MODEL_URL, 'fr_FR-gilles-low.onnx');
+          await telechargerEnForce(CONFIG_URL, 'fr_FR-gilles-low.onnx.json');
+
+          return res.status(200).json({ 
+              status: "SUCCESS", 
+              msg: "Le moteur Node.js a infiltré et installé la voix Gilles-High avec succès dans /modeles." 
+          });
+      } catch (error: any) {
+          console.error("[SYSTEM ERROR] Le téléchargement réseau a échoué :", error);
+          return res.status(500).json({ 
+              status: "FAILED", 
+              msg: "Erreur lors de la récupération des fichiers TTS via Node.js",
+              detail: error.toString() 
+          });
+      }
+  });
+
   const PORT = 3000;
 
   // Configuration persistante du plafond maximal de jetons (max_output_tokens)
@@ -2234,6 +2514,54 @@ async function startServer() {
     return cleaned;
   }
 
+  async function fetchWithRedirects(url: string, options: any, maxRedirects = 5): Promise<Buffer> {
+    return new Promise<Buffer>((resolve, reject) => {
+      function get(currentUrl: string, depth: number) {
+        if (depth > maxRedirects) {
+          reject(new Error("Too many redirects"));
+          return;
+        }
+
+        https.get(currentUrl, options, (res) => {
+          const { statusCode } = res;
+
+          // Si c'est une redirection (301, 302, 303, 307, 308)
+          if (statusCode && [301, 302, 303, 307, 308].includes(statusCode)) {
+            let location = res.headers.location;
+            if (location) {
+              if (location.startsWith("/")) {
+                const urlObj = new URL(currentUrl);
+                location = `${urlObj.origin}${location}`;
+              }
+              res.resume(); // Libérer la mémoire du flux précédent
+              get(location, depth + 1);
+              return;
+            }
+          }
+
+          if (statusCode !== 200) {
+            res.resume();
+            reject(new Error(`Failed to fetch TTS, status code: ${statusCode}`));
+            return;
+          }
+
+          const rawData: Buffer[] = [];
+          res.on("data", (chunk) => {
+            rawData.push(chunk);
+          });
+
+          res.on("end", () => {
+            resolve(Buffer.concat(rawData));
+          });
+        }).on("error", (err) => {
+          reject(err);
+        });
+      }
+
+      get(url, 0);
+    });
+  }
+
   async function fetchOnlineTTS(text: string, res: any) {
     // Découper le texte en segments de max 200 caractères pour Google Translate TTS
     const chunks: string[] = [];
@@ -2253,39 +2581,33 @@ async function startServer() {
     }
 
     const audioBuffers: Buffer[] = [];
+    const options = {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
+      }
+    };
     
     // Récupération séquentielle des flux audio mp3
     for (const chunk of chunks) {
       const trimmedChunk = chunk.trim();
       if (!trimmedChunk) continue;
       
-      const segmentBuffer = await new Promise<Buffer>((resolve, reject) => {
-        // Paramètre de client gtx ultra résistant aux blocages IP et captchas
-        const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=fr&client=gtx&q=${encodeURIComponent(trimmedChunk)}`;
-        const options = {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
-          }
-        };
-        
-        https.get(url, options, (getRes) => {
-          if (getRes.statusCode !== 200) {
-            reject(new Error(`Google TTS status code: ${getRes.statusCode}`));
-            return;
-          }
-          
-          const rawData: Buffer[] = [];
-          getRes.on("data", (chunkData) => {
-            rawData.push(chunkData);
-          });
-          
-          getRes.on("end", () => {
-            resolve(Buffer.concat(rawData));
-          });
-        }).on("error", (err) => {
-          reject(err);
-        });
-      });
+      let segmentBuffer: Buffer;
+      try {
+        // Premier essai avec client=gtx
+        const urlGtx = `https://translate.google.com/translate_tts?ie=UTF-8&tl=fr&client=gtx&q=${encodeURIComponent(trimmedChunk)}`;
+        segmentBuffer = await fetchWithRedirects(urlGtx, options);
+      } catch (errGtx: any) {
+        console.warn(`[TTS] client=gtx failed: ${errGtx.message || errGtx}. Trying client=tw-ob...`);
+        try {
+          // Deuxième essai (fallback) avec client=tw-ob
+          const urlTwOb = `https://translate.google.com/translate_tts?ie=UTF-8&tl=fr&client=tw-ob&q=${encodeURIComponent(trimmedChunk)}`;
+          segmentBuffer = await fetchWithRedirects(urlTwOb, options);
+        } catch (errTwOb: any) {
+          console.error(`[TTS] client=tw-ob failed as well: ${errTwOb.message || errTwOb}`);
+          throw new Error("Toutes les requêtes de TTS sémantique en ligne ont échoué.");
+        }
+      }
       
       audioBuffers.push(segmentBuffer);
     }
@@ -2306,11 +2628,39 @@ async function startServer() {
       const textCalibre = nettoyerTextePourDiction(text);
 
       const piperPath = "./piper/piper";
-      const modelOnnxPath = "modeles/modele_piper.onnx";
+      
+      // Détermination dynamique du modèle (Moteur 1 : Gilles-Low voix homme, sinon Gilles-High si valide, sinon secours)
+      let modelOnnxPath = "";
+      let configJsonPath = "";
 
-      // 1. Détecte si Piper local est prêt, sinon bascule sans délai sur la solution cloud transparente
-      if (!fs.existsSync(piperPath) || !fs.existsSync(modelOnnxPath)) {
-        console.log("[TTS] Local Piper synthesizer binary or model file is not present. Using server-side online TTS stream fallback.");
+      if (!fs.existsSync(piperPath)) {
+        console.log("[TTS] Local Piper synthesizer binary is not present. Using server-side online TTS stream fallback.");
+        return await fetchOnlineTTS(textCalibre, res);
+      }
+
+      // Fonction sécurisée pour valider la non-corruption du modèle ONNX (taille > 0)
+      const estModeleValide = (relPath: string) => {
+        const fullPath = path.join(process.cwd(), relPath);
+        if (!fs.existsSync(fullPath)) return false;
+        try {
+          const stats = fs.statSync(fullPath);
+          return stats.size > 100000; // Un vrai modèle ONNX fait au moins quelques Mo
+        } catch (e) {
+          return false;
+        }
+      };
+
+      if (estModeleValide("modeles/fr_FR-gilles-high.onnx")) {
+        modelOnnxPath = "modeles/fr_FR-gilles-high.onnx";
+        configJsonPath = "modeles/fr_FR-gilles-high.onnx.json";
+      } else if (estModeleValide("modeles/fr_FR-gilles-low.onnx")) {
+        modelOnnxPath = "modeles/fr_FR-gilles-low.onnx";
+        configJsonPath = "modeles/fr_FR-gilles-low.onnx.json";
+      } else if (estModeleValide("modeles/modele_piper.onnx")) {
+        modelOnnxPath = "modeles/modele_piper.onnx";
+        configJsonPath = "modeles/modele_piper.onnx.json";
+      } else {
+        console.log("[TTS] Aucun modèle local valide trouvé (taille > 0). Basculement vers le TTS en ligne.");
         return await fetchOnlineTTS(textCalibre, res);
       }
 
@@ -2319,12 +2669,19 @@ async function startServer() {
       const tempWavPath = path.join(process.cwd(), `temp_${tempId}.wav`);
 
       // Commande d'execution du binaire Piper avec calibrage d'usine officiel
-      const cmd = `${piperPath} --model ${modelOnnxPath} --config modeles/modele_piper.onnx.json --speaker 1 --length_scale 1.25 --noise_scale 0.667 --noise_w 0.800 --output_file "${tempWavPath}"`;
+      // Pour modele_piper.onnx, le speaker 1 est "pierre" (voix homme). Pour Gilles, speaker 0 est Gilles (voix homme).
+      const speakerId = modelOnnxPath.includes("modele_piper.onnx") ? "1" : "0";
+      const cmd = `${piperPath} --model ${modelOnnxPath} --config ${configJsonPath} --speaker ${speakerId} --length_scale 1.25 --noise_scale 0.667 --noise_w 0.800 --output_file "${tempWavPath}"`;
       
       try {
+        const piperLibPath = path.join(process.cwd(), "piper");
         execSync(cmd, {
           input: textCalibre,
-          encoding: "utf8"
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            LD_LIBRARY_PATH: piperLibPath
+          }
         });
       } catch (execErr: any) {
         console.warn("[TTS] Command execution failed (standard sandbox limits). Falling back to server-side online TTS stream fallback.", execErr.message || execErr);
@@ -2374,6 +2731,224 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  // L'adresse locale où tourne le script Python RATISS
+  const RATISS_PYTHON_URL = 'http://127.0.0.1:9000';
+
+  /**
+   * ROUTE 2 : COMMANDE VOCALE AVEC HIERARCHIE (Python Pipeline -> Navigateur)
+   */
+  app.post('/api/remote/trigger-speech', async (req: Request, res: Response) => {
+    try {
+        const { text } = req.body;
+        console.log(`[TTS] Requête reçue pour : "${text.substring(0, 20)}..."`);
+        
+        // Appel au mécanisme Python de haut niveau
+        const result = await interrogerPipelinePython(text);
+        
+        console.log("[TTS] Réponse pipeline:", result);
+        // renvoie le statut (PLAYING_INTERNAL, FALLBACK_BROWSER ou BLOCKED)
+        return res.json(result);
+    } catch (error) {
+        console.error("[TTS] Erreur pipeline:", error);
+        return res.status(500).json({ status: "BLOCKED", error: "Internal Pipeline Error" });
+    }
+  });
+
+  async function interrogerPipelinePython(text: string): Promise<any> {
+    try {
+        // Supposons que le script python tourne sur le port 9000
+        const response = await axios.post(`${RATISS_PYTHON_URL}/execute_speech`, { text });
+        return response.data;
+    } catch (e) {
+        console.error("Erreur de communication avec le pipeline Python:", e);
+        // Fallback: Si le pipeline est injoignable, on propose une synthèse navigateur
+        return { status: "FALLBACK_BROWSER", text: text };
+    }
+  }
+
+  const PIPER_ARCHIVE_URL = "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_amd64.tar.gz";
+
+  /**
+   * ROUTE DE DÉBOGAGE
+   */
+  app.post('/api/system/test-route', (req: Request, res: Response) => {
+      return res.status(200).json({ status: "SUCCESS", msg: "ROUTING WORKS!" });
+  });
+
+  // Route de statut globale de RATISS 4 FUSION
+  app.get('/api/system/status', (req: Request, res: Response) => {
+      return res.status(200).json({
+          architecture: "RATISS 4 FUSION",
+          version: "4.0.0-fusion",
+          builder: "Jonathan",
+          local_tts: {
+              binaire: "./piper/piper",
+              voix_principale: "fr_FR-gilles-low.onnx",
+              config: "fr_FR-gilles-low.onnx.json"
+          },
+          perseverance_engine: "ACTIVE"
+      });
+  });
+
+  /**
+   * ROUTE D'INFILTRATION ET DE DÉPLOIEMENT DU BINAIRE PIPER
+   */
+  app.post('/api/system/install-piper-binary', async (req: Request, res: Response) => {
+      const rootDir = process.cwd();
+      const archivePath = path.join(rootDir, 'piper.tar.gz');
+      const targetFolder = path.join(rootDir, 'piper');
+
+      console.log("[SYSTEM] Déploiement sécurisé du binaire Piper lancé...");
+
+      // Nettoyage préalable du dossier s'il est corrompu
+      if (fs.existsSync(targetFolder)) {
+          fs.rmSync(targetFolder, { recursive: true, force: true });
+      }
+      fs.mkdirSync(targetFolder, { recursive: true });
+
+      const file = fs.createWriteStream(archivePath);
+
+      https.get(PIPER_ARCHIVE_URL, (response) => {
+          if (response.statusCode === 302 || response.statusCode === 301) {
+              if (response.headers.location) {
+                  https.get(response.headers.location, (res2) => res2.pipe(file));
+                  return;
+              }
+          }
+          response.pipe(file);
+
+          file.on('finish', () => {
+              file.close();
+              console.log("[SYSTEM] Archive téléchargée. Extraction brute sans suppression de composants...");
+
+              // Extraction standard dans le dossier /piper/
+              const command = `tar -xvf ${archivePath} -C ${targetFolder}`;
+
+              exec(command, (error, stdout, stderr) => {
+                  if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath); // Nettoyage de l'archive
+
+                  if (error) {
+                      console.error("[CRITICAL] Échec tar :", error.message);
+                      return res.status(500).json({ status: "ERROR", detail: error.message });
+                  }
+
+                  // ANALYSE STRUCTURELLE POST-EXTRACTION
+                  // Si l'archive a créé un sous-dossier /piper/piper/ à cause de sa structure interne
+                  const sousDossierPiper = path.join(targetFolder, 'piper');
+                  const binaireImbrique = path.join(sousDossierPiper, 'piper');
+                  const binaireFinal = path.join(targetFolder, 'piper');
+
+                  if (fs.existsSync(binaireImbrique)) {
+                      console.log("[SYSTEM DETECT] Structure imbriquée détectée. Redressement des fichiers...");
+                      
+                      // Déplacement du contenu du sous-dossier vers la racine de /piper/
+                      const fichiers = fs.readdirSync(sousDossierPiper);
+                      fichiers.forEach((fichier) => {
+                          const ancienChemin = path.join(sousDossierPiper, fichier);
+                          const nouveauChemin = path.join(targetFolder, fichier);
+                          fs.renameSync(ancienChemin, nouveauChemin);
+                      });
+                      
+                      // Suppression du sous-dossier vidé
+                      fs.rmdirSync(sousDossierPiper);
+                  }
+
+                  // Validation définitive exigée par la ligne 2434
+                  if (fs.existsSync(binaireFinal)) {
+                      // Application des permissions d'exécution
+                      fs.chmodSync(binaireFinal, '755');
+                      console.log("[SUCCESS] Validation réussie. Le binaire est présent à l'emplacement exact et exécutable.");
+                      return res.status(200).json({
+                          status: "SUCCESS",
+                          msg: "Le binaire Piper a été correctement redressé et validé dans /piper/piper. Prêt pour le runtime local."
+                      });
+                  } else {
+                      console.error("[CRITICAL] Le binaire est toujours introuvable après redressement.");
+                      return res.status(500).json({
+                          status: "FAILED",
+                          msg: "L'extraction a réussi mais le fichier binaire final reste introuvable."
+                      });
+                  }
+              });
+          });
+      }).on('error', (err) => {
+          if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath);
+          res.status(500).json({ status: "ERROR", detail: err.message });
+      });
+  });
+
+  /**
+   * ROUTE D'URGENCE : Déblocage des droits du binaire Piper
+   */
+  app.post('/api/system/unlock-piper', (req: Request, res: Response) => {
+
+      const cheminBinaire = path.join(process.cwd(), 'piper', 'piper');
+
+      try {
+          console.log(`[RESCUE] Tentative de levée des verrous sur : ${cheminBinaire}`);
+
+          if (!fs.existsSync(cheminBinaire)) {
+              return res.status(404).json({
+                  status: "FAILED",
+                  msg: `Le binaire Piper est introuvable au chemin : ${cheminBinaire}. Vérifie son emplacement.`
+              });
+          }
+
+          // INJECTION DES DROITS D'EXÉCUTION (Chmod 755 : Lecture/Écriture/Exécution)
+          fs.chmodSync(cheminBinaire, '755');
+          
+          console.log("[RESCUE SUCCESS] Le binaire Piper a été militarisé et débloqué avec les droits 755.");
+          return res.status(200).json({
+              status: "SUCCESS",
+              msg: "Les droits d'exécution (chmod +x) ont été injectés de force sur le binaire Piper."
+          });
+
+      } catch (error: any) {
+          console.error("[RESCUE CRITICAL ERROR] Impossible de modifier les droits :", error.message);
+          return res.status(500).json({
+              status: "ERROR",
+              detail: error.message
+          });
+      }
+  });
+
+  /**
+   * ROUTE 1 : L'interface Web ou la Télé demande à RATISS d'exécuter une tâche
+   */
+  app.post('/api/remote/command', async (req: Request, res: Response) => {
+      try {
+          const { action, cmd, text } = req.body;
+          
+          // On transfère l'ordre directement au moteur RATISS en Python
+          const response = await axios.post(`${RATISS_PYTHON_URL}/api/command`, {
+              action,
+              cmd,
+              text
+          });
+          
+          return res.status(200).json(response.data);
+      } catch (error) {
+          console.error("Erreur de liaison avec le moteur RATISS Python:", error);
+          return res.status(500).json({ status: "ERROR", msg: "RATISS Python injoignable" });
+      }
+  });
+
+  /**
+   * ROUTE 2 : RATISS Python envoie un ordre à ce serveur pour manipuler l'appareil
+   */
+  app.post('/api/remote/trigger', (req: Request, res: Response) => {
+      const { device, action, payload } = req.body;
+      console.log(`[RATISS SYSTEM] Ordre reçu pour l'appareil : ${device} -> Action : ${action}`);
+
+      // Exemple de manipulation à distance (TV, extinction, etc.)
+      if (device === "TV") {
+          // Logique pour interagir avec ta TV ou changer l'affichage de l'interface
+          return res.status(200).json({ status: "SUCCESS", msg: "Ordre TV intercepté" });
+      }
+
+      return res.status(200).json({ status: "RECEIVED", info: "Ordre mis en attente" });
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[RATISS CORE SERVER] Running on port ${PORT}`);

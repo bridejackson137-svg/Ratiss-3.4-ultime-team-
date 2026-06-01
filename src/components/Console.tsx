@@ -39,7 +39,8 @@ export const Console: React.FC<ConsoleProps> = ({
   useEffect(() => {
     const handleGlobalSpeechStop = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail && detail.sourceId !== activeConsoleSpeechIdRef.current) {
+      // Arrêter tout si sourceId est null (via __ratissStopAllSpeech) ou si différent
+      if (detail && (detail.sourceId === null || detail.sourceId !== activeConsoleSpeechIdRef.current)) {
         if (activeSpeechCancelRef.current) {
           activeSpeechCancelRef.current();
           activeSpeechCancelRef.current = null;
@@ -126,19 +127,10 @@ export const Console: React.FC<ConsoleProps> = ({
       return;
     }
 
-    // Arrêter toute lecture active globale avant d'en lancer une nouvelle
-    if ((window as any).__activeAudio) {
-      try {
-        (window as any).__activeAudio.pause();
-        (window as any).__activeAudio.src = "";
-      } catch (e) {}
-      (window as any).__activeAudio = null;
+    // Arrêter toute lecture active globale via fonction centralisée
+    if ((window as any).__ratissStopAllSpeech) {
+      (window as any).__ratissStopAllSpeech();
     }
-    if (activeSpeechCancelRef.current) {
-      activeSpeechCancelRef.current();
-      activeSpeechCancelRef.current = null;
-    }
-    setIsSpeechPaused(false);
 
     // Déclencher l'événement d'arrêt global pour synchroniser les autres composants
     window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: entry.id } }));
@@ -170,14 +162,36 @@ export const Console: React.FC<ConsoleProps> = ({
       setIsSpeechPaused(false);
     };
 
-    audio.play().catch(err => {
-      if (cancelled) return;
-      if (err.name === 'AbortError') {
-        return;
+    let isPlayingLocally = false;
+    let localAudioSuccess = false;
+
+    audio.onplay = () => {
+      localAudioSuccess = true;
+    };
+    audio.onplaying = () => {
+      isPlayingLocally = true;
+      localAudioSuccess = true;
+    };
+    audio.ontimeupdate = () => {
+      if (audio.currentTime > 0) {
+        localAudioSuccess = true;
       }
-      console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
-      activerVoixNavigateur();
-    });
+    };
+
+    audio.play()
+      .then(() => {
+        isPlayingLocally = true;
+        localAudioSuccess = true;
+      })
+      .catch(err => {
+        if (cancelled) return;
+        if (err.name === 'AbortError') {
+          return;
+        }
+        if (isPlayingLocally || localAudioSuccess || audio.currentTime > 0) return;
+        console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
+        activerVoixNavigateur();
+      });
 
     audio.onended = () => {
       if (cancelled) return;
@@ -190,6 +204,10 @@ export const Console: React.FC<ConsoleProps> = ({
 
     audio.onerror = () => {
       if (cancelled) return;
+      if (isPlayingLocally || localAudioSuccess || audio.currentTime > 0) {
+        // Ignorer les erreurs non-fatales de fin de de flux WAV pour éviter le redoublement
+        return;
+      }
       console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
       activerVoixNavigateur();
     };
@@ -209,6 +227,19 @@ export const Console: React.FC<ConsoleProps> = ({
     activeSpeechCancelRef.current = activerCancellationTTS;
 
     function activerVoixNavigateur() {
+      // SÉCURITÉ DE ROTATION : Libérer définitivement l'audio local
+      cancelled = true;
+      try {
+        audio.pause();
+        audio.src = "";
+        audio.onended = null;
+        audio.onerror = null;
+        audio.onplaying = null;
+        audio.onplay = null;
+        audio.ontimeupdate = null;
+      } catch (e) {}
+
+      let browserCancelled = false;
       try {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(cleanedText);
@@ -217,7 +248,7 @@ export const Console: React.FC<ConsoleProps> = ({
         utterance.pitch = 0.85;
 
         utterance.onend = () => {
-          if (cancelled) return;
+          if (browserCancelled) return;
           setActiveConsoleSpeechId(null);
           setIsSpeechPaused(false);
           if (activeSpeechCancelRef.current === activerCancellationBrowser) {
@@ -226,7 +257,7 @@ export const Console: React.FC<ConsoleProps> = ({
         };
 
         utterance.onerror = () => {
-          if (cancelled) return;
+          if (browserCancelled) return;
           setActiveConsoleSpeechId(null);
           setIsSpeechPaused(false);
           if (activeSpeechCancelRef.current === activerCancellationBrowser) {
@@ -235,7 +266,7 @@ export const Console: React.FC<ConsoleProps> = ({
         };
 
         const activerCancellationBrowser = () => {
-          cancelled = true;
+          browserCancelled = true;
           window.speechSynthesis.cancel();
           setIsSpeechPaused(false);
         };
@@ -243,7 +274,7 @@ export const Console: React.FC<ConsoleProps> = ({
 
         window.speechSynthesis.speak(utterance);
       } catch (synthErr) {
-        if (!cancelled) {
+        if (!browserCancelled) {
           setActiveConsoleSpeechId(null);
           setIsSpeechPaused(false);
         }
@@ -311,7 +342,7 @@ export const Console: React.FC<ConsoleProps> = ({
       <div className="bg-neutral-900/60 px-4 py-3 border-b border-neutral-900 flex justify-between items-center text-sm rounded-t-lg">
         <div className="flex items-center gap-2 text-neutral-300">
           <Terminal size={15} className="text-emerald-500 animate-pulse" />
-          <span className="font-bold text-xs tracking-wider uppercase">CONSOLE & SÉDIMENTATION v3.4</span>
+          <span className="font-bold text-xs tracking-wider uppercase">CONSOLE & SÉDIMENTATION RATISS 4 FUSION</span>
         </div>
         <div className="flex items-center gap-3 text-[10px] text-neutral-500">
           <span className="flex items-center gap-1">
@@ -534,7 +565,7 @@ export const Console: React.FC<ConsoleProps> = ({
                 type="text"
                 value={discussionValue}
                 onChange={(e) => setDiscussionValue(e.target.value)}
-                placeholder="Discuter avec RATISS v3.4..."
+                placeholder="Discuter avec RATISS 4 FUSION..."
                 className="flex-1 bg-neutral-950 border border-neutral-850 rounded px-2.5 py-1.5 text-xs text-emerald-300 placeholder-neutral-700 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/10 font-mono transition-colors"
                 disabled={isPending}
               />
