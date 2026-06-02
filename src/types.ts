@@ -58,6 +58,8 @@ export interface ConsoleEntry {
   timestamp: string;
   text: string;
   type: 'input' | 'system' | 'response' | 'error' | 'sedimentation';
+  action?: string;
+  pensees?: string;
 }
 
 export interface Concept {
@@ -72,4 +74,24 @@ export interface ConceptExtended extends Concept {
   id: string;
   isExpanded: boolean;
   timestamp: string;
+}
+
+export interface RatissMetadata {
+  source: string;
+  environnement: string;
+  timestamp_local: string;
+}
+
+export interface VectorMemoryPayload {
+  user_id: string;
+  titre: string;
+  vecteur_768d: number[]; // Tableau strict de 768 nombres flottants
+  metadata: RatissMetadata;
+}
+
+export interface RatissResponse {
+  pensees: string;
+  action: string;
+  reponse: string;
+  statut: string;
 }

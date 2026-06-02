@@ -12,6 +12,8 @@ interface ApiVaultProps {
   activeRoutedId: string | null;
   selectedModels: Record<string, string>;
   onSelectModel: (providerId: string, modelId: string) => void;
+  vaultKeys: Record<string, string>;
+  onUpdateVaultKey: (providerId: string, key: string) => void;
 }
 
 export const ApiVault: React.FC<ApiVaultProps> = ({
@@ -23,17 +25,11 @@ export const ApiVault: React.FC<ApiVaultProps> = ({
   activeRoutedId,
   selectedModels,
   onSelectModel,
+  vaultKeys,
+  onUpdateVaultKey,
 }) => {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [keysState, setKeysState] = useState<Record<string, string>>(() => {
-    try {
-      const saved = localStorage.getItem('ratiss_vault_keys');
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
   const [keyValue, setKeyValue] = useState('');
   const [saveStatus, setSaveStatus] = useState<Record<string, 'idle' | 'saving' | 'saved'>>({});
 
@@ -57,10 +53,8 @@ export const ApiVault: React.FC<ApiVaultProps> = ({
   const handleSaveKey = async (id: string) => {
     setSaveStatus(prev => ({ ...prev, [id]: 'saving' }));
     
-    // Core local persistent update
-    const nextKeys = { ...keysState, [id]: keyValue };
-    setKeysState(nextKeys);
-    localStorage.setItem('ratiss_vault_keys', JSON.stringify(nextKeys));
+    // Core local persistent update via parent
+    onUpdateVaultKey(id, keyValue);
 
     // Try real Supabase writing sync if connected
     if (supabase) {
@@ -90,14 +84,12 @@ export const ApiVault: React.FC<ApiVaultProps> = ({
     setIsScanning(prev => ({ ...prev, [id]: true }));
     setScanErrors(prev => ({ ...prev, [id]: '' }));
 
-    // Get the key either from modified input (local keyValue) or from persisted store keysState
-    const keyToScan = keyValue || keysState[id] || '';
+    // Get the key either from modified input (local keyValue) or from persisted store vaultKeys
+    const keyToScan = keyValue || vaultKeys[id] || '';
 
-    // If key has been changed, save it first, keeping original saved status updated
-    if (keyValue && keyValue !== keysState[id]) {
-      const nextKeys = { ...keysState, [id]: keyValue };
-      setKeysState(nextKeys);
-      localStorage.setItem('ratiss_vault_keys', JSON.stringify(nextKeys));
+    // If key has been changed, save it first
+    if (keyValue && keyValue !== vaultKeys[id]) {
+      onUpdateVaultKey(id, keyValue);
       if (supabase) {
         try {
           await supabase.from('table_api_vault').update({ api_key: keyValue }).eq('id', id);
@@ -326,7 +318,7 @@ export const ApiVault: React.FC<ApiVaultProps> = ({
                         setExpandedId(null);
                       } else {
                         setExpandedId(p.id);
-                        setKeyValue(keysState[p.id] || '');
+                        setKeyValue(vaultKeys[p.id] || '');
                       }
                     }}
                     className={`p-1 rounded border transition-colors cursor-pointer flex items-center justify-center ${

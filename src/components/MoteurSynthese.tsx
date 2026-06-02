@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Brain, Zap, Loader2, Sparkles, Terminal, Info, Copy, Check, RefreshCw, Maximize2, Minimize2, ChevronDown, ChevronRight, Hash, Search } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../supabase';
 import { ConceptExtended } from '../types';
+import { ArreterAbsolumentToutAudio, gererFluxAudioUnique } from '../ratissAudioCore';
 
 interface MoteurSyntheseProps {
   activeProviderId: string;
@@ -106,164 +107,20 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
   };
 
   const handleTTS = async (item: ConceptExtended) => {
-    // Si l'objet cliqué est déjà en cours de lecture, on l'arrête
     if (activeSpeechId === item.id) {
-       if (activeSpeechCancelRef.current) {
-          activeSpeechCancelRef.current();
-          activeSpeechCancelRef.current = null;
-       }
+       ArreterAbsolumentToutAudio();
        setActiveSpeechId(null);
-       setIsSpeechPaused(false);
        return;
     }
 
-    // Arrêter toute lecture active globale
-    if ((window as any).__ratissStopAllSpeech) {
-      (window as any).__ratissStopAllSpeech();
-    }
-    window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: item.id } }));
-
-    // Compilation textuelle
-    const rawText = `${item.titre}. ${item.logique}. Application : ${item.application}`;
-    const cleanedText = calibrerEtEpurerTexte(rawText, vecteurRecherche);
+    ArreterAbsolumentToutAudio();
     setActiveSpeechId(item.id);
-    setIsSpeechPaused(false);
 
-    const encodedText = encodeURIComponent(cleanedText);
-    const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
+    const rawText = `${item.titre}. ${item.logique}. Application : ${item.application}`;
+    await gererFluxAudioUnique(rawText);
 
-    const audio = new Audio(audioUrl);
-    audioRef.current = audio;
-    (window as any).__activeAudio = audio;
-
-    let cancelled = false;
-    let localAudioSuccess = false;
-
-    activeSpeechCancelRef.current = () => {
-      cancelled = true;
-      try {
-        audio.pause();
-        audio.src = "";
-      } catch (e) {}
-      window.speechSynthesis.cancel();
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-      setIsSpeechPaused(false);
-    };
-
-    audio.onplay = () => {
-      localAudioSuccess = true;
-    };
-    audio.onplaying = () => {
-      localAudioSuccess = true;
-    };
-    audio.ontimeupdate = () => {
-      if (audio.currentTime > 0) {
-        localAudioSuccess = true;
-      }
-    };
-
-    audio.play()
-      .then(() => {
-        localAudioSuccess = true;
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        if (err.name === 'AbortError') {
-          return;
-        }
-        if (localAudioSuccess || audio.currentTime > 0) return;
-        console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
-        activerVoixNavigateur(cleanedText);
-      });
-
-    audio.onended = () => {
-      if (cancelled) return;
+    if (activeSpeechIdRef.current === item.id) {
       setActiveSpeechId(null);
-      setIsSpeechPaused(false);
-      if (activeSpeechCancelRef.current === activerCancellationTTS) {
-        activeSpeechCancelRef.current = null;
-      }
-    };
-
-    audio.onerror = () => {
-      if (cancelled) return;
-      if (localAudioSuccess || audio.currentTime > 0) {
-        // Ignorer les erreurs non-fatales de fin de de flux WAV pour éviter le redoublement
-        return;
-      }
-      console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
-      activerVoixNavigateur(cleanedText);
-    };
-
-    const activerCancellationTTS = () => {
-      cancelled = true;
-      try {
-        audio.pause();
-        audio.src = "";
-      } catch (e) {}
-      window.speechSynthesis.cancel();
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-      setIsSpeechPaused(false);
-    };
-    activeSpeechCancelRef.current = activerCancellationTTS;
-
-    function activerVoixNavigateur(text: string) {
-      // SÉCURITÉ DE ROTATION : Libérer définitivement l'audio local
-      cancelled = true;
-      try {
-        audio.pause();
-        audio.src = "";
-        audio.onended = null;
-        audio.onerror = null;
-        audio.onplaying = null;
-        audio.onplay = null;
-        audio.ontimeupdate = null;
-      } catch (e) {}
-
-      let browserCancelled = false;
-      try {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'fr-FR';
-        utterance.rate = 1.05;
-        utterance.pitch = 0.85;
-
-        utterance.onend = () => {
-          if (browserCancelled) return;
-          setActiveSpeechId(null);
-          setIsSpeechPaused(false);
-          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
-            activeSpeechCancelRef.current = null;
-          }
-        };
-
-        utterance.onerror = () => {
-          if (browserCancelled) return;
-          setActiveSpeechId(null);
-          setIsSpeechPaused(false);
-          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
-            activeSpeechCancelRef.current = null;
-          }
-        };
-
-        const activerCancellationBrowser = () => {
-          browserCancelled = true;
-          window.speechSynthesis.cancel();
-          setIsSpeechPaused(false);
-        };
-        activeSpeechCancelRef.current = activerCancellationBrowser;
-
-        window.speechSynthesis.speak(utterance);
-      } catch (synthErr) {
-        if (!browserCancelled) {
-          setActiveSpeechId(null);
-          setIsSpeechPaused(false);
-        }
-      }
     }
   };
 

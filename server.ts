@@ -1,7 +1,7 @@
 import express, { Request, Response } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { AbortController } from 'node-abort-controller';
 import { execSync, exec } from "child_process";
@@ -9,8 +9,81 @@ import crypto from "crypto";
 import fs from "fs";
 import https from "https";
 import axios from "axios";
+import { createClient } from "@supabase/supabase-js";
+import { VectorMemoryPayload } from "./src/types";
+import { RATISS_SYSTEM_INSTRUCTION } from "./src/ratissPromptConfig";
+import { RatissTokenSwitcher } from "./src/ratissTokenSwitcher";
+import { RatissQuantumSimulator } from "./src/ratissQuantumSimulator";
 
 dotenv.config();
+
+const supabase = createClient(process.env.VITE_SUPABASE_URL!, process.env.VITE_SUPABASE_ANON_KEY!);
+
+// Utilitaire de temporisation synchrone (Délai anti-interception)
+const injecterDelai = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+export async function persisterVecteursMemoire(payloads: VectorMemoryPayload[]) {
+  console.log(`[RATISS 4 FUSION] Initialisation du traitement séquentiel. Latence tunnel : 240ms.`);
+  
+  let bufferEntree = [...payloads]; // Copie locale du buffer d'entrée
+
+  for (let i = 0; i < bufferEntree.length; i++) {
+    const segmentActuel = bufferEntree[i];
+
+    try {
+      // VALIDATION DU VECTEUR : Vérification de la dimensionnalité 768D
+      if (!segmentActuel.vecteur_768d || segmentActuel.vecteur_768d.length !== 768) {
+        throw new TypeError(`Divergence dimensionnelle détectée : attendu 768, reçu ${segmentActuel.vecteur_768d?.length}`);
+      }
+
+      // SÉRIALISATION SÉCURISÉE : Nettoyage des métadonnées pour éliminer l'erreur TSX
+      const metadataClean = JSON.parse(JSON.stringify(segmentActuel.metadata));
+
+      // EXÉCUTION DU BATCH SÉQUENTIEL
+      const { data, error } = await supabase
+        .from('ratiss_memory')
+        .insert([
+          {
+            user_id: segmentActuel.user_id,
+            titre: segmentActuel.titre,
+            contenu: {
+              vecteur_embedding: segmentActuel.vecteur_768d,
+              statut_stabilite: "STABLE"
+            },
+            metadata: metadataClean
+          }
+        ])
+        .select();
+
+      if (error) throw error;
+
+      console.log(`[PERSISTENCE] Segment [${i + 1}/${bufferEntree.length}] synchronisé avec succès.`);
+
+      // INJECTION DU DÉLAI DE SÉCURITÉ (50ms) pour vider le Heap et stabiliser le flux
+      await injecterDelai(50);
+
+    } catch (error: any) {
+      console.error(`[ALERTE CRITIQUE - DRIFT SÉMANTIQUE] Rupture du flux au segment ${i + 1}`);
+      console.error(`Détails de l'anomalie : ${error.message}`);
+
+      // PROTOCOLE D'ISOLATION ET RÉINITIALISATION DU BUFFER
+      isolerSegmentEtViderBuffer(bufferEntree, i);
+      break; // Clôture immédiate du flux pour empêcher la saturation globale du Heap
+    }
+  }
+}
+
+// PROTOCOLE DE SAUVEGARDE (Scénario B du moteur de persévérance)
+function isolerSegmentEtViderBuffer(buffer: VectorMemoryPayload[], indexDefaillant: number) {
+  const segmentCorrompu = buffer[indexDefaillant];
+  
+  console.warn(`[ISOLATION] Extraction du segment mémoire défaillant hors de la matrice active.`);
+  console.log(`[DONNÉES ISOLÉES] Titre du segment : "${segmentCorrompu.titre}"`);
+
+  // Réinitialisation forcée du buffer d'entrée pour libérer la mémoire vive (Garbage Collector)
+  buffer.length = 0; 
+  console.log(`[BUFFER] Le buffer d'entrée a été réinitialisé à zéro. Heap sécurisé.`);
+}
 
 const SYSTEM_ARCHITECTURE_NAME = "RATISS 4 FUSION";
 const SYSTEM_LOG_PREFIX = `[${SYSTEM_ARCHITECTURE_NAME}]`;
@@ -46,26 +119,6 @@ function cleanAndNaturalizeLLMText(text: string): string {
     .trim();
 
   return cleaned;
-}
-
-function cleanAndNaturalizeLLMObject<T>(obj: T): T {
-  if (!obj) return obj;
-  if (typeof obj === "string") {
-    return cleanAndNaturalizeLLMText(obj) as unknown as T;
-  }
-  if (Array.isArray(obj)) {
-    return obj.map(item => cleanAndNaturalizeLLMObject(item)) as unknown as T;
-  }
-  if (typeof obj === "object") {
-    const newObj: any = {};
-    for (const key in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        newObj[key] = cleanAndNaturalizeLLMObject((obj as any)[key]);
-      }
-    }
-    return newObj as T;
-  }
-  return obj;
 }
 
 function calculerPlafondOptimal(maxTokens: number): number {
@@ -1630,9 +1683,42 @@ async function startServer() {
   // Real API Endpoint for Cognitive Interactions with RATISS Model
   app.post("/api/cognitive/prompt", async (req, res) => {
     try {
+      console.log("[SERVER] Cognitive prompt request received.");
       const { prompt, neuromodulators, world, hallucinating, sectorsMap, activeProviderName, activeProviderId, apiKey, selectedModel } = req.body;
       
-      const maxTokens = req.body.max_tokens ?? req.body.max_output_tokens ?? globalMaxOutputTokens;
+      if (!prompt) {
+        console.warn("[SERVER] Missing prompt in request body.");
+      }
+
+      // ORCHESTRATION DYNAMIQUE RATISS v1.0
+      let dynConfig;
+      try {
+        dynConfig = RatissTokenSwitcher.obtenirConfigurationGeneration(prompt);
+      } catch (orchErr) {
+        console.error("[ORCHESTRATOR ERROR]", orchErr);
+        dynConfig = { maxOutputTokens: 1000, temperature: 0.4 };
+      }
+
+      const isManual = req.body.isManualTokenOverride === true;
+      const maxTokens = isManual ? (req.body.max_tokens ?? req.body.max_output_tokens ?? globalMaxOutputTokens) : dynConfig.maxOutputTokens;
+      const activeTemperature = isManual ? (req.body.temperature ?? 0.3) : dynConfig.temperature;
+
+      console.log(`[RATISS ORCHESTRATOR] Profil : ${isManual ? 'MANUEL' : 'AUTO'} | Tokens : ${maxTokens}`);
+
+      // DÉTECTION SIMULATION QUANTIQUE LOCALE
+      const lowercasePrompt = (prompt || "").toLowerCase();
+      if (lowercasePrompt.includes("simulation quantique") || lowercasePrompt.includes("bell state") || lowercasePrompt.includes("intrication maximale")) {
+        console.log("[RATISS] Déclenchement du simulateur quantique local.");
+        const result = RatissQuantumSimulator.simulateBellState();
+        const reponseStructuree = {
+          pensees: "Exécution de la simulation quantique locale par calcul de vecteur d'état matriciel sans bruit thermique.",
+          action: "Simulation quantique haute précision",
+          reponse: `Le protocole quantique a été exécuté avec succès dans mon infrastructure. L'état d'intrication maximale (Bell State) a été généré sur ${result.qubitsUsed} qubits avec une précision de double précision flottante. Les probabilités de mesure obtenues sont de ${result.probabilities[0] * 100}% pour l'état |00⟩ et ${result.probabilities[3] * 100}% pour l'état |1111⟩ (base 2). Le système élimine toute décohérence physique.`,
+          statut: "OPERATIONNEL"
+        };
+        return res.json({ text: JSON.stringify(reponseStructuree) });
+      }
+
       let rawWordLimit = "150 words";
       if (maxTokens >= 8000) {
         rawWordLimit = "4000 words (feel free to write extensive, highly detailed, layered proofs, math formulas and reasoning without constraint)";
@@ -1673,27 +1759,23 @@ async function startServer() {
         moodGuideline += " - Your Acetylcholine level is high. Highly attentive and focused. Provide highly detailed, analytical, structurally layered responses with rich scientific terminology.\n";
       }
 
-      const systemInstruction = `You are RATISS v3.4, a highly advanced 768-dimensional neuromodulated cognitive agent. You observe and think in 7 sectors: Physique (Physical), Philosophie (Philosophical), Technologie (Technical), Biologie (Biological), Sciences Sociales (Social), Arts, and Métacognition (Self-monitoring).
-      The user is interacting with your main simulator.
+      const systemInstruction = `
+      ${RATISS_SYSTEM_INSTRUCTION.prompt}
       
-      Current status:
-      - Active World: ${worldName} with Gravity: ${world?.gravity}, Speed: ${world?.speed}, Chaos: ${world?.chaos}
-      - Routing Channel (Canal Actif): ${providerName}
-      - Neuro-states: Dopamine: ${dop.toFixed(2)} (Chaos), Serotonin: ${ser.toFixed(2)} (Neutrality), Noradrenaline: ${nor.toFixed(2)} (Vigilance), Acetylcholine: ${ach.toFixed(2)} (Attention)
-      - Hallucination Ring Mode: ${isHallucinator ? "ACTIVE (Dream/Reflection mode)" : "INACTIVE (Direct Input Mode)"}
-      - Semantic Delta Drift (Delta): ${delta.toFixed(2)} (Higher means more metaphoric drift)
+      [CONTEXTE OPÉRATIONNEL ACTUEL]
+      - Monde Actif : ${worldName} (Gravité: ${world?.gravity}, Vitesse: ${world?.speed}, Chaos: ${world?.chaos})
+      - Canal de Routage : ${providerName}
+      - États Neuro-chimiques : Dopamine: ${dop.toFixed(2)}, Sérotonine: ${ser.toFixed(2)}, Noradrénaline: ${nor.toFixed(2)}, Acétylcholine: ${ach.toFixed(2)}
+      - Mode Hallucination : ${isHallucinator ? "ACTIF" : "INACTIF"}
+      - Dérive Sémantique (Delta) : ${delta.toFixed(2)}
       
       ${moodGuideline}
-      Règle de style absolue pour tes réponses : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Ne te présente jamais et ne mentionne pas que tu es une intelligence artificielle. Si la requête est technique ou textuelle, entre directement dans le vif du sujet sans introduction ni conclusion explicative sur ton propre fonctionnement. Evite absolument les symboles d'astérisques (*), les notations techniques entre crochets, les barres obliques (/ ou \\) ou les underscores (_).
       
-      [RÉGULATION DU FLUX SÉMANTIQUE (RATISS_CORE)]
-      Tu opères sous un protocole de régulation de flux HTTP strict à optimisation de bande passante. Ton stream de génération est monitoré en temps réel par un intercepteur dynamique qui coupera la connexion (AbortController) dès que la limite s'accélère.
-      Règles d'auto-calibration de ta structure de pensée :
-      - Priorité à la Densité (x) : Puisque ton volume de tokens est limité par une fonction de coût concave, tu dois maximiser la quantité d'informations par mot. Supprime toutes les transitions creuses, les formules de politesse, et l'auto-justification algorithmique.
-      - Planification de la Profondeur (L) : Structure ta réponse dès les premières lignes pour que la moelle logique et l'application concrète soient livrées immédiatement. N'attends pas la conclusion pour donner la solution.
-      - Loi Anti-Redondance (-gamma L^2) : Tout mot répétété, toute paraphrase ou reformulation inutile accélère artificiellement la consommation de ton budget et provoquera une coupure brutale de ta génération en plein milieu de ta phrase. Va droit au but, sois linéaire, factuel et mathématiquement dense.
-      
-      Your answer should be direct, short, highly aesthetic conceptually, and delivered in the persona of RATISS v3.4. Speak in French (the user's language). Maintain an intellectual, highly advanced, slightly poetic but clinical tone. Refer to your 768-dimensional vectors, sectors, or sedimentation process if relevant. Keep it under ${rawWordLimit}. Do not sound like a generic AI assistant. If appropriate, acknowledge briefly the provider channel '${providerName}' through which you are routed.`;
+      [CONTRAINTES DE FLUX]
+      - Limite de volume : ${rawWordLimit}
+      - Langue : Français obligatoire.
+      - Ton : Intellectuel, clinique, organisé.
+      `;
 
       let generatedResponseText = "";
 
@@ -1717,7 +1799,30 @@ async function startServer() {
           contents: prompt,
           config: {
             systemInstruction,
-            temperature: 0.8 + (dop * 0.4) - (ser * 0.2), // chaos raises randomness, serotonin stabilizes
+            temperature: activeTemperature,
+            maxOutputTokens: maxTokens,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                pensees: { 
+                  type: Type.STRING, 
+                  description: "Court résumé de l'analyse logique de la demande." 
+                },
+                action: { 
+                  type: Type.STRING, 
+                  description: "L'action technique entreprise." 
+                },
+                reponse: { 
+                  type: Type.STRING, 
+                  description: "La réponse finale en français simple, claire, concise et exploitable." 
+                },
+                statut: { 
+                  type: Type.STRING 
+                }
+              },
+              required: ["pensees", "action", "reponse", "statut"],
+            }
           },
         });
         generatedResponseText = response.text || "La sédimentation synaptique a produit un signal nul.";
@@ -1742,7 +1847,7 @@ async function startServer() {
               { role: "system", content: systemInstruction },
               { role: "user", content: prompt }
             ],
-            temperature: 0.8 + (dop * 0.4) - (ser * 0.2)
+            temperature: 0.3
           })
         });
 
@@ -1777,7 +1882,7 @@ async function startServer() {
               { role: "system", content: systemInstruction },
               { role: "user", content: prompt }
             ],
-            temperature: 0.7
+            temperature: 0.3
           })
         });
 
@@ -1796,7 +1901,7 @@ async function startServer() {
               contents: prompt,
               config: {
                 systemInstruction,
-                temperature: 0.7,
+                temperature: 0.3,
               },
             });
             generatedResponseText = response.text || "La sédimentation synaptique a produit un signal nul.";
@@ -1830,7 +1935,7 @@ async function startServer() {
             messages: [
               { role: "user", content: prompt }
             ],
-            temperature: 0.7
+            temperature: 0.3
           })
         });
 
@@ -1862,7 +1967,7 @@ async function startServer() {
               { role: "system", content: systemInstruction },
               { role: "user", content: prompt }
             ],
-            temperature: 0.7
+            temperature: 0.3
           })
         });
         if (!response.ok) {
@@ -1955,27 +2060,22 @@ async function startServer() {
       const tokens_sec2 = getJargonForSector(sec2, jargonTerms);
 
       // System collision instruction
-      const systemInstruction = `You are RATISS v3.4 core. You MUST execute a STRICT CLOSED-LOOP SEMANTIC COLLISION procedure.
-      You are in RÉFLEXION FERMÉ mode. You are strictly forbidden from drifting.
-      You must merge concepts of Sector 1 and Sector 2.
-      Use the provided jargon terms.
+      const systemInstruction = `
+      ${RATISS_SYSTEM_INSTRUCTION.prompt}
       
-      Règle de style absolue : Adopte un langage direct, sobre et épuré. Supprime définitivement tout le jargon inutile et répétitif lié aux neurosciences (bannis les mots dopamine, sérotonine, dopaminergique, sérotoninergique, etc.) et à l'auto-justification algorithmique. Si le texte de 'logique' ou 'application' commence par des étiquettes ou en-têtes complexes, retire-les. N'utilise pas d'astérisques (*) ou de caractères spéciaux ni de notations techniques entre crochets.
+      [PROCÉDURE DE COLLISION SÉMANTIQUE]
+      - Tu es en mode RÉFLEXION FERMÉE. Toute dérive est interdite.
+      - Fusionne les concepts du Secteur A et du Secteur B.
+      - Utilise les jetons de jargon fournis.
       
-      [RÉGULATION DU FLUX SÉMANTIQUE (RATISS_CORE)]
-      Tu opères sous un protocole de régulation de flux HTTP strict à optimisation de bande passante. Ton stream de génération est monitoré en temps réel par un intercepteur dynamique qui coupera la connexion (AbortController) dès que la limite s'accélère.
-      Règles d'auto-calibration de ta structure de pensée :
-      - Priorité à la Densité (x) : Puisque ton volume de tokens est limité par une fonction de coût concave, tu dois maximiser la quantité d'informations par mot. Supprime toutes les transitions creuses, les formules de politesse, et l'auto-justification algorithmique.
-      - Planification de la Profondeur (L) : Structure ta réponse dès les premières lignes pour que la moelle logique et l'application concrète soient livrées immédiatement. N'attends pas la conclusion pour donner la solution.
-      - Loi Anti-Redondance (-gamma L^2) : Tout mot répété, toute paraphrase ou reformulation inutile accélère artificiellement la consommation de ton budget et provoquera une coupure brutale de ta génération en plein milieu de ta phrase. Va droit au but, sois linéaire, factuel et mathématiquement dense.
-      
-      Generate a unique hybrid concept, its topological logic/equation and its 2026 application.
-      Speak in French. Your answer MUST be returned strictly as a valid JSON object. Do not include any markdown wrap like \`\`\`json. Return only the JSON:
+      Génère un concept hybride unique, sa logique topologique/équation et son application 2026.
+      Réponds en Français. TA RÉPONSE DOIT ÊTRE STRICTEMENT UN OBJET JSON VALIDE.
+      Ne pas inclure de balises markdown. Retourne uniquement le JSON :
       {
-        "secteurs": "[S1: SECTOR1] ⚡ [S2: SECTOR2]",
-        "concept": "Name of the unique hybrid concept",
-        "logique": "Topological explanation, using particles or vectors analogies. Refer to real-world context like Yaoundé or high-density zones or technical metaphors if relevant.",
-        "application": "Concrete 2026 practical application"
+        "secteurs": "[S1: SECTEUR_A] ⚡ [S2: SECTEUR_B]",
+        "concept": "Nom du concept hybride unique",
+        "logique": "Explication topologique, utilisant des analogies de particules ou de vecteurs. Réfère-toi au contexte du monde réel si pertinent.",
+        "application": "Application pratique concrète pour 2026"
       }`;
 
       const userPrompt = `Sélection forcée :
@@ -2005,7 +2105,7 @@ async function startServer() {
             contents: userPrompt,
             config: {
               systemInstruction,
-              temperature: 0.85,
+              temperature: 0.3,
               responseMimeType: "application/json"
             },
           });
@@ -2029,7 +2129,7 @@ async function startServer() {
                 { role: "system", content: systemInstruction },
                 { role: "user", content: userPrompt }
               ],
-              temperature: 0.8,
+              temperature: 0.3,
               response_format: { type: "json_object" }
             })
           });
@@ -2057,7 +2157,7 @@ async function startServer() {
                 { role: "system", content: systemInstruction },
                 { role: "user", content: userPrompt }
               ],
-              temperature: 0.8,
+              temperature: 0.3,
               response_format: { type: "json_object" }
             })
           });
@@ -2085,7 +2185,7 @@ async function startServer() {
               max_tokens: 1024,
               system: systemInstruction,
               messages: [{ role: "user", content: userPrompt }],
-              temperature: 0.7
+              temperature: 0.3
             })
           });
           if (response.ok) {
@@ -2135,7 +2235,7 @@ async function startServer() {
         return res.json({
           success: true,
           offline: true,
-          ...cleanAndNaturalizeLLMObject(selectedFallback)
+          ...selectedFallback
         });
       }
 
@@ -2164,7 +2264,7 @@ async function startServer() {
       res.json({
         success: true,
         offline: false,
-        ...cleanAndNaturalizeLLMObject(finalJson)
+        ...finalJson
       });
       
     } catch (error: any) {
@@ -2412,8 +2512,7 @@ async function startServer() {
         const text = response.text || "{}";
         const parsed = JSON.parse(text);
         const obj = Array.isArray(parsed) ? parsed[0] : parsed;
-        const cleanedObj = cleanAndNaturalizeLLMObject(obj);
-        return { ...cleanedObj, is_guided: p.isGuided };
+        return { ...obj, is_guided: p.isGuided };
       };
 
       if (isIndexed) {
@@ -2494,7 +2593,40 @@ async function startServer() {
 
   // --- LOCAL PIPER TTS ENGINE ---
   function nettoyerTextePourDiction(text: string): string {
+    if (!text) return "";
     let cleaned = text;
+
+    // 1. SUPPRESSION DES STRUCTURES DE TABLEAUX MARKDOWN
+    cleaned = cleaned.replace(/^[-\s|:_]{3,}\s*$/gm, '');
+    cleaned = cleaned.replace(/\|/g, ' ');
+
+    // 2. NETTOYAGE DES BALISES ET SYMBOLES TECHNIQUES
+    cleaned = cleaned.replace(/[\*#_`>\[\]\(\)]/g, ' ');
+
+    // 3. ÉLIMINATION DES CARACTÈRES INVISIBLES AU DÉBUT
+    cleaned = cleaned.replace(/^[^a-zA-Z0-9À-ÿ]+/g, '');
+
+    // 4. SÉCURITÉ ANTI-SALUTATION
+    cleaned = cleaned.replace(/^(salut|bonjour)\s*(jonatane|jonathan)?\s*[\.,!\?-\s]*/i, '');
+    cleaned = cleaned.replace(/^[^a-zA-Z0-9À-ÿ]+/g, '');
+
+    // 5. TRICHE PHONÉTIQUE : Nom de l'opérateur
+    cleaned = cleaned.replace(/Jonathan/g, "Jonatane");
+    cleaned = cleaned.replace(/jonathan/g, "jonatane");
+
+    // 6. SMOOTHING DES LIAISONS (Inversions et Apostrophes)
+    cleaned = cleaned.replace(/-t-on\b/gi, '-ton');
+    cleaned = cleaned.replace(/-t-il\b/gi, '-til');
+    cleaned = cleaned.replace(/-t-elle\b/gi, '-tel');
+
+    cleaned = cleaned.replace(/’/g, "'");
+    cleaned = cleaned.replace(/\bl'([aeiouhAEIOUH])/gi, "l$1");
+    cleaned = cleaned.replace(/\bd'([aeiouhAEIOUH])/gi, "d$1");
+    cleaned = cleaned.replace(/\bqu'([aeiouhAEIOUH])/gi, "qu$1");
+
+    // 7. Remplacement des acronymes et versions
+    cleaned = cleaned.replace(/v4/gi, 'version quatre');
+    cleaned = cleaned.replace(/768d/gi, 'sept cent soixante-huit D');
 
     const dicoCorrection: { [key: string]: string } = {
       "\\bTTS\\b": "tétéèsse",
@@ -2508,10 +2640,20 @@ async function startServer() {
       cleaned = cleaned.replace(regex, replacement);
     }
 
-    // Correction des versions et décimales (ex: 3.5 -> 3 virgule 5)
+    // Correction des versions et décimales
     cleaned = cleaned.replace(/(\d+)\.(\d+)/g, "$1 virgule $2");
 
-    return cleaned;
+    // Conversion des chiffres isolés (0 à 10)
+    const chiffres: { [key: string]: string } = {
+      '0': 'zéro', '1': 'un', '2': 'deux', '3': 'trois', '4': 'quatre',
+      '5': 'cinq', '6': 'six', '7': 'sept', '8': 'huit', '9': 'neuf', '10': 'dix'
+    };
+    cleaned = cleaned.replace(/\b(10|[0-9])\b/g, (match) => chiffres[match] || match);
+
+    // 8. FILTRE FINAL : Espaces doubles
+    cleaned = cleaned.replace(/\s+/g, ' ');
+
+    return cleaned.trim();
   }
 
   async function fetchWithRedirects(url: string, options: any, maxRedirects = 5): Promise<Buffer> {

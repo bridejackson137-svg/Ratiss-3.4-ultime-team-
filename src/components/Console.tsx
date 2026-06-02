@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ConsoleEntry, JargonTerm } from '../types';
 import { Send, Terminal, Anchor, Sparkles, Maximize2, Minimize2 } from 'lucide-react';
+import { ArreterAbsolumentToutAudio, gererFluxAudioUnique } from '../ratissAudioCore';
 
 interface ConsoleProps {
   entries: ConsoleEntry[];
@@ -25,7 +26,6 @@ export const Console: React.FC<ConsoleProps> = ({
   const [lastSedimented, setLastSedimented] = useState<{ concept: string; jargon: string } | null>(null);
   const [isConsoleExpanded, setIsConsoleExpanded] = useState(false);
   const [activeConsoleSpeechId, setActiveConsoleSpeechId] = useState<string | null>(null);
-  const [isSpeechPaused, setIsSpeechPaused] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleCopyText = (text: string, id: string) => {
@@ -37,258 +37,35 @@ export const Console: React.FC<ConsoleProps> = ({
     });
   };
   const scrollRef = useRef<HTMLDivElement>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeConsoleSpeechIdRef = useRef<string | null>(null);
-  const activeSpeechCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     activeConsoleSpeechIdRef.current = activeConsoleSpeechId;
   }, [activeConsoleSpeechId]);
 
-  // Stop speech on unmount and listen to global stop events
+  // Stop speech on unmount
   useEffect(() => {
-    const handleGlobalSpeechStop = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      // Arrêter tout si sourceId est null (via __ratissStopAllSpeech) ou si différent
-      if (detail && (detail.sourceId === null || detail.sourceId !== activeConsoleSpeechIdRef.current)) {
-        if (activeSpeechCancelRef.current) {
-          activeSpeechCancelRef.current();
-          activeSpeechCancelRef.current = null;
-        }
-        setIsSpeechPaused(false);
-        setActiveConsoleSpeechId(null);
-      }
-    };
-    window.addEventListener('app-speech-stop', handleGlobalSpeechStop);
-
     return () => {
-      if (activeSpeechCancelRef.current) {
-        activeSpeechCancelRef.current();
-        activeSpeechCancelRef.current = null;
-      }
-      setIsSpeechPaused(false);
-      window.speechSynthesis.cancel();
-      window.removeEventListener('app-speech-stop', handleGlobalSpeechStop);
+      ArreterAbsolumentToutAudio();
+      setActiveConsoleSpeechId(null);
     };
   }, []);
 
-  const cleanAndNaturalizeConsoleSpeech = (text: string, texteSaisiUtilisateur: string = ""): string => {
-    const estUneSalutation = /^(bonjour|salut|hello|présente|qui es-tu)/i.test(texteSaisiUtilisateur.trim());
-    let cleanText = text;
-
-    if (!estUneSalutation) {
-      cleanText = cleanText.replace(/(en tant qu'intelligence artificielle|je suis le système ratiss|en utilisant l'IA de gemini)/gi, "");
-      cleanText = cleanText.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "");
-    } else {
-      cleanText = cleanText.replace(/^(réponse gemini\s*[:\-]*|calcul matriciel\s*[:\-]*|intention\s*[:\-]*|indexation\s*[:\-]*|réponse\s*[:\-]*|auteur\s*[:\-]*)/gi, "Oui, bonjour. ");
-    }
-
-    const jargonAEviter = /(dopaminergique[s]?|sérotoninergique[s]?|dopamine|sérotonine|isomorphisme projectif|gradient de néguentropie|table RLS|sécurité failover)/gi;
-    cleanText = cleanText.replace(jargonAEviter, (match) => {
-      const lower = match.toLowerCase();
-      if (lower.startsWith('dopa') || lower.startsWith('séro')) {
-        return "efficace";
-      }
-      return "liaison";
-    });
-
-    cleanText = cleanText
-      .replace(/\*/g, "")
-      .replace(/[\/\\]/g, " ")
-      .replace(/[\#\_]/g, "")
-      .replace(/\[.*?\]/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    return cleanText;
-  };
-
-  const handleToggleConsolePause = () => {
-    if (!activeConsoleSpeechId) return;
-    
-    if (isSpeechPaused) {
-      if (audioRef.current) {
-        audioRef.current.play().catch(() => {});
-      }
-      if (window.speechSynthesis.speaking && window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-      }
-      setIsSpeechPaused(false);
-    } else {
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
-      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
-        window.speechSynthesis.pause();
-      }
-      setIsSpeechPaused(true);
-    }
-  };
-
-  const handleConsoleTTS = (entry: ConsoleEntry) => {
-    // Si l'objet cliqué est déjà en cours de lecture, on l'arrête inconditionnellement
+  const handleConsoleTTS = async (entry: ConsoleEntry) => {
     if (activeConsoleSpeechId === entry.id) {
-      if (activeSpeechCancelRef.current) {
-        activeSpeechCancelRef.current();
-        activeSpeechCancelRef.current = null;
-      }
+      ArreterAbsolumentToutAudio();
       setActiveConsoleSpeechId(null);
-      setIsSpeechPaused(false);
       return;
     }
 
-    // Arrêter toute lecture active globale via fonction centralisée
-    if ((window as any).__ratissStopAllSpeech) {
-      (window as any).__ratissStopAllSpeech();
-    }
-
-    // Déclencher l'événement d'arrêt global pour synchroniser les autres composants
-    window.dispatchEvent(new CustomEvent('app-speech-stop', { detail: { sourceId: entry.id } }));
-
-    const rawText = entry.text.trim();
-    const cleanedText = cleanAndNaturalizeConsoleSpeech(rawText, discussionValue);
-
-    // Encodage
-    const encodedText = encodeURIComponent(cleanedText);
-    const audioUrl = `/api/cognitive/tts?text=${encodedText}`;
-
-    const audio = new Audio(audioUrl);
-    audioRef.current = audio;
-    (window as any).__activeAudio = audio;
+    ArreterAbsolumentToutAudio();
     setActiveConsoleSpeechId(entry.id);
-    setIsSpeechPaused(false);
 
-    let cancelled = false;
-    activeSpeechCancelRef.current = () => {
-      cancelled = true;
-      try {
-        audio.pause();
-        audio.src = ""; // Coupe instantanément le chargement réseau
-      } catch (e) {}
-      window.speechSynthesis.cancel();
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-      setIsSpeechPaused(false);
-    };
+    await gererFluxAudioUnique(entry.text);
 
-    let isPlayingLocally = false;
-    let localAudioSuccess = false;
-
-    audio.onplay = () => {
-      localAudioSuccess = true;
-    };
-    audio.onplaying = () => {
-      isPlayingLocally = true;
-      localAudioSuccess = true;
-    };
-    audio.ontimeupdate = () => {
-      if (audio.currentTime > 0) {
-        localAudioSuccess = true;
-      }
-    };
-
-    audio.play()
-      .then(() => {
-        isPlayingLocally = true;
-        localAudioSuccess = true;
-      })
-      .catch(err => {
-        if (cancelled) return;
-        if (err.name === 'AbortError') {
-          return;
-        }
-        if (isPlayingLocally || localAudioSuccess || audio.currentTime > 0) return;
-        console.warn("Local TTS play error, fallback to browser speechSynthesis", err);
-        activerVoixNavigateur();
-      });
-
-    audio.onended = () => {
-      if (cancelled) return;
+    // Auto-stop: Reset button state once audio is finished
+    if (activeConsoleSpeechIdRef.current === entry.id) {
       setActiveConsoleSpeechId(null);
-      setIsSpeechPaused(false);
-      if (activeSpeechCancelRef.current === activerCancellationTTS) {
-        activeSpeechCancelRef.current = null;
-      }
-    };
-
-    audio.onerror = () => {
-      if (cancelled) return;
-      if (isPlayingLocally || localAudioSuccess || audio.currentTime > 0) {
-        // Ignorer les erreurs non-fatales de fin de de flux WAV pour éviter le redoublement
-        return;
-      }
-      console.warn("audio.onerror fired: invoking fallback browser speechSynthesis");
-      activerVoixNavigateur();
-    };
-
-    const activerCancellationTTS = () => {
-      cancelled = true;
-      try {
-        audio.pause();
-        audio.src = "";
-      } catch (e) {}
-      window.speechSynthesis.cancel();
-      if ((window as any).__activeAudio === audio) {
-        (window as any).__activeAudio = null;
-      }
-      setIsSpeechPaused(false);
-    };
-    activeSpeechCancelRef.current = activerCancellationTTS;
-
-    function activerVoixNavigateur() {
-      // SÉCURITÉ DE ROTATION : Libérer définitivement l'audio local
-      cancelled = true;
-      try {
-        audio.pause();
-        audio.src = "";
-        audio.onended = null;
-        audio.onerror = null;
-        audio.onplaying = null;
-        audio.onplay = null;
-        audio.ontimeupdate = null;
-      } catch (e) {}
-
-      let browserCancelled = false;
-      try {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(cleanedText);
-        utterance.lang = 'fr-FR';
-        utterance.rate = 1.05;
-        utterance.pitch = 0.85;
-
-        utterance.onend = () => {
-          if (browserCancelled) return;
-          setActiveConsoleSpeechId(null);
-          setIsSpeechPaused(false);
-          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
-            activeSpeechCancelRef.current = null;
-          }
-        };
-
-        utterance.onerror = () => {
-          if (browserCancelled) return;
-          setActiveConsoleSpeechId(null);
-          setIsSpeechPaused(false);
-          if (activeSpeechCancelRef.current === activerCancellationBrowser) {
-            activeSpeechCancelRef.current = null;
-          }
-        };
-
-        const activerCancellationBrowser = () => {
-          browserCancelled = true;
-          window.speechSynthesis.cancel();
-          setIsSpeechPaused(false);
-        };
-        activeSpeechCancelRef.current = activerCancellationBrowser;
-
-        window.speechSynthesis.speak(utterance);
-      } catch (synthErr) {
-        if (!browserCancelled) {
-          setActiveConsoleSpeechId(null);
-          setIsSpeechPaused(false);
-        }
-      }
     }
   };
 
@@ -424,7 +201,22 @@ export const Console: React.FC<ConsoleProps> = ({
                   )}
                   {entry.type === 'response' && (
                     <div className="relative group/speech">
-                      <div className={`text-neutral-300 bg-neutral-900/30 rounded border border-neutral-950 whitespace-pre-line leading-relaxed select-text shadow-inner transition-all ${isConsoleExpanded ? 'p-4 pr-32 text-xs sm:text-sm bg-neutral-900/50 gap-2 border-neutral-800' : 'p-2 pr-28 text-[11px]'}`}>
+                      <div className={`text-neutral-300 bg-neutral-900/30 rounded border border-neutral-950 whitespace-pre-line leading-relaxed select-text shadow-inner transition-all flex flex-col ${isConsoleExpanded ? 'p-4 pr-32 text-xs sm:text-sm bg-neutral-900/50 gap-2 border-neutral-800' : 'p-2 pr-28 text-[11px]'}`}>
+                        {entry.pensees && (
+                          <div className="text-[10px] text-neutral-500 italic mb-1 border-b border-neutral-800 pb-1">
+                            {entry.pensees}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                          {entry.action && (
+                            <span className="bg-emerald-950/40 text-emerald-400 text-[8px] font-black px-1.5 py-0.5 rounded border border-emerald-800 uppercase tracking-tighter">
+                              {entry.action}
+                            </span>
+                          )}
+                          <span className="bg-neutral-800 text-neutral-400 text-[8px] font-bold px-1.5 py-0.5 rounded border border-neutral-700 uppercase tracking-tighter">
+                            V5.0 PROTOCOL
+                          </span>
+                        </div>
                         {entry.text}
                       </div>
                       <div className="absolute top-2.5 right-2 flex gap-1 items-center">
@@ -438,14 +230,6 @@ export const Console: React.FC<ConsoleProps> = ({
                         >
                           {activeConsoleSpeechId === entry.id ? '⏹ STOP AUDIO' : '🔊 RÉSUMÉ AUDIO'}
                         </button>
-                        {activeConsoleSpeechId === entry.id && (
-                          <button
-                            onClick={() => handleToggleConsolePause()}
-                            className="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all border bg-amber-950/80 border-amber-500/50 text-amber-400 hover:bg-amber-900/60"
-                          >
-                            {isSpeechPaused ? '▶️ REPRENDRE' : '⏸ PAUSE'}
-                          </button>
-                        )}
                         <button
                           type="button"
                           onClick={() => handleCopyText(entry.text, entry.id)}
