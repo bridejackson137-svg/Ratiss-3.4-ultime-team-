@@ -109,8 +109,8 @@ export const ApiVault: React.FC<ApiVaultProps> = ({
         }),
       });
 
-      if (!response.ok) {
-        throw new Error(`Code HTTP ${response.status}`);
+      if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) {
+        throw new Error(`Code HTTP ${response.status} ou API invalide`);
       }
 
       const data = await response.json();

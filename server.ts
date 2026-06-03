@@ -14,10 +14,14 @@ import { VectorMemoryPayload } from "./src/types";
 import { RATISS_SYSTEM_INSTRUCTION } from "./src/ratissPromptConfig";
 import { RatissTokenSwitcher } from "./src/ratissTokenSwitcher";
 import { RatissQuantumSimulator } from "./src/ratissQuantumSimulator";
+import { executerDeviationQwen } from "./src/apiVaultRouter";
 
 dotenv.config();
 
-const supabase = createClient(process.env.VITE_SUPABASE_URL!, process.env.VITE_SUPABASE_ANON_KEY!);
+const supabase = createClient(
+  process.env.VITE_SUPABASE_URL!, 
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY!
+);
 
 // Utilitaire de temporisation synchrone (Délai anti-interception)
 const injecterDelai = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -1700,10 +1704,11 @@ async function startServer() {
       }
 
       const isManual = req.body.isManualTokenOverride === true;
-      const maxTokens = isManual ? (req.body.max_tokens ?? req.body.max_output_tokens ?? globalMaxOutputTokens) : dynConfig.maxOutputTokens;
+      const rawMaxTokens = isManual ? (req.body.max_tokens ?? req.body.max_output_tokens ?? globalMaxOutputTokens) : dynConfig.maxOutputTokens;
+      const maxTokens = Math.min(rawMaxTokens, 8192); // Cap technique obligatoire pour éviter les 400 sur les APIs Google/OpenAI
       const activeTemperature = isManual ? (req.body.temperature ?? 0.3) : dynConfig.temperature;
 
-      console.log(`[RATISS ORCHESTRATOR] Profil : ${isManual ? 'MANUEL' : 'AUTO'} | Tokens : ${maxTokens}`);
+      console.log(`[RATISS ORCHESTRATOR] Profil : ${isManual ? 'MANUEL' : 'AUTO'} | Tokens demandés : ${rawMaxTokens} (Plafonné à ${maxTokens})`);
 
       // DÉTECTION SIMULATION QUANTIQUE LOCALE
       const lowercasePrompt = (prompt || "").toLowerCase();
@@ -1775,6 +1780,7 @@ async function startServer() {
       - Limite de volume : ${rawWordLimit}
       - Langue : Français obligatoire.
       - Ton : Intellectuel, clinique, organisé.
+      - FORMAT DE RÉPONSE OBLIGATOIRE : Tu dois impérativement renvoyer un objet JSON contenant EXACTEMENT ces clés : 'pensees' (tes réflexions internes masquées de l'utilisateur), 'action' (ce que tu fais), 'reponse' (ce que l'utilisateur verra), 'statut' (ton état). NE RIEN AFFICHER D'AUTRE.
       `;
 
       let generatedResponseText = "";
@@ -1844,10 +1850,12 @@ async function startServer() {
           body: JSON.stringify({
             model: modelToUse,
             messages: [
-              { role: "system", content: systemInstruction },
+              { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
               { role: "user", content: prompt }
             ],
-            temperature: 0.3
+            temperature: activeTemperature,
+            max_tokens: maxTokens,
+            response_format: { type: "json_object" }
           })
         });
 
@@ -1879,10 +1887,12 @@ async function startServer() {
           body: JSON.stringify({
             model: modelToUse, // Use gpt-4o-mini as a safe non-prohibitive default model
             messages: [
-              { role: "system", content: systemInstruction },
+              { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
               { role: "user", content: prompt }
             ],
-            temperature: 0.3
+            temperature: activeTemperature,
+            max_completion_tokens: maxTokens,
+            response_format: { type: "json_object" }
           })
         });
 
@@ -1902,6 +1912,7 @@ async function startServer() {
               config: {
                 systemInstruction,
                 temperature: 0.3,
+                responseMimeType: "application/json"
               },
             });
             generatedResponseText = response.text || "La sédimentation synaptique a produit un signal nul.";
@@ -1913,42 +1924,18 @@ async function startServer() {
           generatedResponseText = data.choices?.[0]?.message?.content || "La sédimentation OpenAI a produit un signal vide.";
         }
       }
-      else if (providerId === "claude") {
+      else if (providerId === "qwen") {
         if (!apiKey) {
           return res.json({
             success: false,
-            error: "Clé API manquante dans l'ApiVault pour le canal Claude."
+            error: "Clé API manquante dans l'ApiVault pour le canal Qwen."
           });
         }
-        const modelToUse = selectedModel || "claude-3-5-sonnet-20241022";
-        const response = await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01"
-          },
-          body: JSON.stringify({
-            model: modelToUse,
-            max_tokens: 1024,
-            system: systemInstruction,
-            messages: [
-              { role: "user", content: prompt }
-            ],
-            temperature: 0.3
-          })
-        });
-
-        if (!response.ok) {
-          const errText = await response.text();
-          let parsedErr: any;
-          try { parsedErr = JSON.parse(errText); } catch { parsedErr = null; }
-          const errMsg = parsedErr?.error?.message || errText || `HTTP ${response.status}`;
-          throw new Error(`Anthropic Claude API: ${errMsg}`);
+        try {
+          generatedResponseText = await executerDeviationQwen({ prompt, max_tokens: maxTokens }, apiKey);
+        } catch (error: any) {
+          throw new Error(`Qwen API: ${error.message}`);
         }
-
-        const data = await response.json();
-        generatedResponseText = data.content?.[0]?.text || "La sédimentation Claude a produit un signal vide.";
       }
       else if (providerId === "wavespeed") {
         const keyToUse = apiKey || process.env.WAVESPEED_API_KEY;
@@ -1964,7 +1951,7 @@ async function startServer() {
           body: JSON.stringify({
             model: selectedModel || "gpt-4o",
             messages: [
-              { role: "system", content: systemInstruction },
+              { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
               { role: "user", content: prompt }
             ],
             temperature: 0.3
@@ -2126,7 +2113,7 @@ async function startServer() {
             body: JSON.stringify({
               model: selectedModel || "llama-3.3-70b-versatile",
               messages: [
-                { role: "system", content: systemInstruction },
+                { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
                 { role: "user", content: userPrompt }
               ],
               temperature: 0.3,
@@ -2154,7 +2141,7 @@ async function startServer() {
             body: JSON.stringify({
               model: selectedModel || "gpt-4o-mini",
               messages: [
-                { role: "system", content: systemInstruction },
+                { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
                 { role: "user", content: userPrompt }
               ],
               temperature: 0.3,
@@ -2171,29 +2158,9 @@ async function startServer() {
           offlineMode = true;
         }
       }
-      else if (providerId === "claude" && apiKey) {
+      else if (providerId === "qwen" && apiKey) {
         try {
-          const response = await fetch("https://api.anthropic.com/v1/messages", {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "x-api-key": apiKey,
-              "anthropic-version": "2023-06-01"
-            },
-            body: JSON.stringify({
-              model: selectedModel || "claude-3-5-sonnet-20241022",
-              max_tokens: 1024,
-              system: systemInstruction,
-              messages: [{ role: "user", content: userPrompt }],
-              temperature: 0.3
-            })
-          });
-          if (response.ok) {
-            const data = await response.json();
-            textResult = data.content?.[0]?.text || "";
-          } else {
-            offlineMode = true;
-          }
+          textResult = await executerDeviationQwen({ prompt: userPrompt }, apiKey);
         } catch {
           offlineMode = true;
         }
@@ -2356,35 +2323,33 @@ async function startServer() {
           (data.data || []).forEach((m: any) => models.push({ id: m.id, name: m.id }));
         }
       }
-      else if (providerId === "claude") {
+      else if (providerId === "qwen") {
         if (!apiKey) {
-          return res.status(200).json({ success: false, error: "Veuillez fournir une clé API Claude." });
+          return res.status(200).json({ success: false, error: "Veuillez fournir une clé API Qwen." });
         }
         try {
-          const response = await fetch("https://api.anthropic.com/v1/models", {
+          const response = await fetch("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models", {
             headers: {
-              "x-api-key": apiKey,
-              "anthropic-version": "2023-06-01"
+              "Authorization": `Bearer ${apiKey}`
             }
           });
           if (response.ok) {
             const data = await response.json();
             models = (data.data || []).map((m: any) => ({
               id: m.id,
-              name: m.display_name || m.id
+              name: m.id
             }));
           } else {
             const errText = await response.text();
             let errJson: any;
             try { errJson = JSON.parse(errText); } catch { errJson = null; }
             const errMsg = errJson?.error?.message || `Erreur HTTP ${response.status}`;
-            return res.status(200).json({ success: false, error: `Anthropic API: ${errMsg}` });
+            return res.status(200).json({ success: false, error: `Qwen API: ${errMsg}` });
           }
         } catch (e: any) {
           models = [
-            { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet (Latest)" },
-            { id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
-            { id: "claude-3-opus-20240229", name: "Claude 3 Opus" }
+            { id: "qwen-3.7-turbo", name: "Qwen 3.7 Turbo" },
+            { id: "qwen-3.7-plus", name: "Qwen 3.7 Plus" }
           ];
         }
       }
@@ -2453,6 +2418,68 @@ async function startServer() {
   });
 
   // Batch Synthesis Engine for RATISS v3.4 (Standard Stream or Indexed Target)
+  const CORE_SESSION = 'RATISS_CORE_MEMORY';
+
+  app.get("/api/ratiss/debug-inspect", async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from('ratiss_memory')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(10);
+
+      if (error) throw error;
+      res.json({ success: true, data });
+    } catch (error: any) {
+      console.error("[RATISS DEBUG] Erreur lors de l'inspection :", error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/ratiss/save-message", async (req, res) => {
+    try {
+      console.log("[RATISS API] Requête reçue - Body:", req.body);
+      const { role, content } = req.body;
+      
+      if (!role || !content) {
+        console.error("[RATISS API] Params manquants");
+        throw new Error("Missing parameters");
+      }
+      
+      const { data, error } = await supabase
+        .from('ratiss_memory')
+        .insert([{ session_id: CORE_SESSION, role, content }]);
+
+      if (error) {
+        console.error("[RATISS API] Erreur Supabase :", error);
+        throw error;
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("[RATISS API] Erreur lors de la sauvegarde :", error);
+      res.status(500).json({ success: false, error: error.message, detail: error });
+    }
+  });
+
+  app.get("/api/ratiss/get-messages", async (req, res) => {
+    try {
+      const limiteMessages = parseInt(req.query.limiteMessages as string) || 20;
+
+      const { data, error } = await supabase
+        .from('ratiss_memory')
+        .select('*')
+        .eq('session_id', CORE_SESSION)
+        .order('id', { ascending: false })
+        .limit(limiteMessages);
+
+      if (error) throw error;
+      res.json({ messages: (data || []).reverse() });
+    } catch (error: any) {
+      console.error("[RATISS API] Erreur lors de la récupération :", error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   app.post("/api/cognitive/batch-synthetise", async (req, res) => {
     try {
       const { intention, mode, activeProviderId, apiKey, selectedModel } = req.body;
@@ -2492,25 +2519,118 @@ async function startServer() {
       { "secteurs": "Secteur A ⚡ Secteur B", "titre": "...", "logique": "...", "application": "..." }`;
 
       const generatesTask = async (p: { text: string, isGuided: boolean }) => {
-        let client: GoogleGenAI;
-        if (apiKey) {
-          client = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
-        } else {
-          client = getGeminiClient();
+        const temperature = p.isGuided ? 0.3 : 0.9;
+        
+        let textResult = "";
+
+        if (activeProviderId === "gemini") {
+          let client: GoogleGenAI;
+          if (apiKey) {
+            client = new GoogleGenAI({ apiKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
+          } else {
+            client = getGeminiClient();
+          }
+          const response = await safeGeminiGenerate(client, {
+            model: selectedModel || "gemini-3.5-flash",
+            contents: p.text,
+            config: {
+              systemInstruction,
+              temperature: temperature,
+              responseMimeType: "application/json"
+            },
+          });
+          textResult = response.text || "{}";
+        } 
+        else if (activeProviderId === "groq") {
+          const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+              model: selectedModel || "llama-3.3-70b-versatile",
+              messages: [
+                { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
+                { role: "user", content: p.text }
+              ],
+              temperature: temperature,
+              response_format: { type: "json_object" }
+            })
+          });
+          if (!response.ok) throw new Error("Groq API Error");
+          const data = await response.json();
+          textResult = data.choices?.[0]?.message?.content || "{}";
+        }
+        else if (activeProviderId === "openai") {
+          const response = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+              model: selectedModel || "gpt-4o-mini",
+              messages: [
+                { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
+                { role: "user", content: p.text }
+              ],
+              temperature: temperature,
+              response_format: { type: "json_object" }
+            })
+          });
+          if (!response.ok) throw new Error("OpenAI API Error");
+          const data = await response.json();
+          textResult = data.choices?.[0]?.message?.content || "{}";
+        }
+        else if (activeProviderId === "qwen") {
+          const response = await fetch("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+              model: selectedModel || "qwen-plus",
+              messages: [
+                { role: "system", content: systemInstruction + " (IMPORTANT: RETOURNES UNIQUEMENT LE JSON)" },
+                { role: "user", content: p.text }
+              ],
+              temperature: temperature,
+            })
+          });
+          if (!response.ok) throw new Error(`Qwen API Error: ${response.status}`);
+          const data = await response.json();
+          textResult = data.choices?.[0]?.message?.content || "{}";
+        }
+        else if (activeProviderId === "wavespeed") {
+          const response = await fetch("https://api.wavespeed.ai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey || process.env.WAVESPEED_API_KEY}`
+            },
+            body: JSON.stringify({
+              model: selectedModel || "wavespeed-3.5-turbo",
+              messages: [
+                { role: "system", content: systemInstruction + " (json FORMAT REQUIRED)" },
+                { role: "user", content: p.text }
+              ],
+              temperature: temperature,
+              response_format: { type: "json_object" }
+            })
+          });
+          if (!response.ok) throw new Error("Wavespeed API Error");
+          const data = await response.json();
+          textResult = data.choices?.[0]?.message?.content || "{}";
+        }
+        else {
+          throw new Error("Provider non supporté");
         }
 
-        const response = await safeGeminiGenerate(client, {
-          model: selectedModel || "gemini-3.5-flash",
-          contents: p.text,
-          config: {
-            systemInstruction,
-            temperature: p.isGuided ? 0.3 : 0.9,
-            responseMimeType: "application/json"
-          },
-        });
-
-        const text = response.text || "{}";
-        const parsed = JSON.parse(text);
+        // Nettoyage markdown éventuel
+        textResult = textResult.trim().replace(/^```[a-z]*\s*/i, "").replace(/\s*```$/i, "");
+        const parsed = JSON.parse(textResult);
         const obj = Array.isArray(parsed) ? parsed[0] : parsed;
         return { ...obj, is_guided: p.isGuided };
       };

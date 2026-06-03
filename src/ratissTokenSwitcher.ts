@@ -3,7 +3,7 @@
  * MODULE : DYNAMIC TOKEN SWITCHER v1.0
  */
 
-export type TokenProfile = 'BASIC' | 'MEDIUM' | 'MAX_RESOURCE';
+export type TokenProfile = 'BASIC' | 'MEDIUM' | 'HIGH' | 'MAX_RESOURCE' | 'ULTIMATE';
 
 interface ModelConfig {
   maxOutputTokens: number;
@@ -19,8 +19,13 @@ export class RatissTokenSwitcher {
     if (!input) return 'BASIC';
     const texte = input.toLowerCase().trim();
 
+    // 0. Détection mode audit vide absolu (mot-clé audit)
+    if (texte.includes('audit') || texte.includes('claude') || texte.includes('sensorbuffer')) {
+      return 'MAX_RESOURCE';
+    }
+
     // 1. Détection des requêtes complexes (Calculs, Code lourd, Théories)
-    const motsClesMax = [
+    const motsClesHigh = [
       'calcul', 'quantique', 'théorie', 'algorithme', 'pipeline', 
       'complet', 'architecture', 'structure', 'implémentation', 'base de données',
       'développement', 'backend', 'frontend', 'supabase'
@@ -31,18 +36,28 @@ export class RatissTokenSwitcher {
       'salut', 'bonjour', 'ça va', 'test', 'ok', 'merci', 'hello'
     ];
 
+    // Si requiert 60000 tokens (mode audit)
+    if (texte.length > 5000 || texte.includes('audit vide absolu 60000')) {
+      return 'ULTIMATE'; 
+    }
+
+    // Si requiert 20000 tokens
+    if (texte.length > 2000) {
+      return 'MAX_RESOURCE'; // Profil 20000 tokens
+    }
+
     // Si l'input contient un mot-clé hautement technique ou est très long
-    if (motsClesMax.some(mot => texte.includes(mot)) || texte.length > 300) {
-      return 'MAX_RESOURCE'; // Profil 8000 tokens
+    if (motsClesHigh.some(mot => texte.includes(mot)) || texte.length > 300) {
+      return 'HIGH'; // Profil 8000 tokens
     }
 
     // Si c'est une salutation simple ou un texte très court (moins de 4 mots)
-    if (motsClesBasic.some(mot => texte.includes(mot)) || texte.split(/\s+/).length <= 4) {
+    if (motsClesBasic.some(mot => texte.includes(mot)) || texte.split(/\s+/).length <= 2) {
       return 'BASIC'; // Profil 200 tokens par défaut
     }
 
     // Par défaut, pour les questions intermédiaires
-    return 'MEDIUM'; // Profil 1000 tokens
+    return 'MEDIUM'; // Profil 4000 tokens
   }
 
   /**
@@ -59,17 +74,27 @@ export class RatissTokenSwitcher {
         };
       case 'MEDIUM':
         return {
-          maxOutputTokens: 1000, // Pour les explications et analyses standards
+          maxOutputTokens: 4000, // Pour les explications et analyses standards
           temperature: 0.4
+        };
+      case 'HIGH':
+        return {
+          maxOutputTokens: 8000, 
+          temperature: 0.5       
         };
       case 'MAX_RESOURCE':
         return {
-          maxOutputTokens: 8000, // Pleine puissance pour le code et les gros calculs
-          temperature: 0.5       // Légère flexibilité pour la résolution de problèmes complexes
+          maxOutputTokens: 20000, 
+          temperature: 0.0       
+        };
+      case 'ULTIMATE':
+        return {
+          maxOutputTokens: 60000, // Mode vide absolu maximal
+          temperature: 0.0       
         };
       default:
         return {
-          maxOutputTokens: 1000,
+          maxOutputTokens: 4000,
           temperature: 0.4
         };
     }

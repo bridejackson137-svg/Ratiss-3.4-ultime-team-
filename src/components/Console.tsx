@@ -78,6 +78,7 @@ export const Console: React.FC<ConsoleProps> = ({
 
   const handleEducationSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     if (isHallucinating) return; // Disconnected in dream mode
     if (!educationValue.trim()) return;
 
@@ -107,6 +108,7 @@ export const Console: React.FC<ConsoleProps> = ({
 
   const handleDiscussionSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     if (isHallucinating) return; // Disconnected in dream mode
     if (!discussionValue.trim()) return;
 
@@ -202,17 +204,7 @@ export const Console: React.FC<ConsoleProps> = ({
                   {entry.type === 'response' && (
                     <div className="relative group/speech">
                       <div className={`text-neutral-300 bg-neutral-900/30 rounded border border-neutral-950 whitespace-pre-line leading-relaxed select-text shadow-inner transition-all flex flex-col ${isConsoleExpanded ? 'p-4 pr-32 text-xs sm:text-sm bg-neutral-900/50 gap-2 border-neutral-800' : 'p-2 pr-28 text-[11px]'}`}>
-                        {entry.pensees && (
-                          <div className="text-[10px] text-neutral-500 italic mb-1 border-b border-neutral-800 pb-1">
-                            {entry.pensees}
-                          </div>
-                        )}
-                        <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                          {entry.action && (
-                            <span className="bg-emerald-950/40 text-emerald-400 text-[8px] font-black px-1.5 py-0.5 rounded border border-emerald-800 uppercase tracking-tighter">
-                              {entry.action}
-                            </span>
-                          )}
+                        <div className="flex items-center gap-2 flex-wrap mb-1.5 opacity-50">
                           <span className="bg-neutral-800 text-neutral-400 text-[8px] font-bold px-1.5 py-0.5 rounded border border-neutral-700 uppercase tracking-tighter">
                             V5.0 PROTOCOL
                           </span>

@@ -13,6 +13,7 @@ import { ApiVault } from './ApiVault';
 import ArchiveSingularites from './ArchiveSingularites';
 import { Brain, Waves, Compass } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../supabase';
+import { sauvegarderMessage, recupererContexteChronologique } from '../lib/ratissMemory';
 
 interface MainDashboardProps {
   userId: string | null;
@@ -91,10 +92,10 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
 
   // 5. API Vault security list
   const [apiProviders, setApiProviders] = useState<ApiProvider[]>([
-    { id: 'gemini', name: 'Google Gemini 3.5', priority: 1, status: 'active', quota: '450/1500 req', latency: '240ms' },
+    { id: 'qwen', name: 'Qwen 3.7 (OpenAI)', priority: 1, status: 'active', quota: '0/2000 req', latency: '180ms' },
     { id: 'openai', name: 'OpenAI GPT-4o', priority: 2, status: 'active', quota: '25/1000 req', latency: '350ms' },
     { id: 'groq', name: 'Groq LLaMA-3', priority: 3, status: 'active', quota: 'Unlimited', latency: '40ms' },
-    { id: 'claude', name: 'Anthropic Claude 3.5', priority: 4, status: 'active', quota: '120/500 req', latency: '420ms' },
+    { id: 'gemini', name: 'Google Gemini 3.5', priority: 4, status: 'active', quota: '450/1500 req', latency: '240ms' },
     { id: 'wavespeed', name: 'Wavespeed GPT-4o', priority: 5, status: 'active', quota: 'Unlimited', latency: '200ms' },
   ]);
 
@@ -118,6 +119,29 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
 
   // Track the currently active routed channel, calculated at send time
   const [activeRoutedId, setActiveRoutedId] = useState<string | null>('gemini');
+  
+  // Stable session ID for memory persistence
+  const [currentSessionId] = useState(() => {
+    if (userId) return userId;
+    let id = sessionStorage.getItem('ratiss_current_session');
+    if (!id) {
+        id = 'session_' + Math.random().toString(36).substr(2, 9);
+        sessionStorage.setItem('ratiss_current_session', id);
+    }
+    return id;
+  });
+
+  // Diagnostic: verify memory functionality on mount
+  useEffect(() => {
+    async function runDiagnostic() {
+      if (currentSessionId) {
+        console.log(`[DIAGNOSTIC] Vérification de la mémoire pour session: ${currentSessionId}`);
+        const messages = await recupererContexteChronologique(currentSessionId, 100);
+        console.log(`[DIAGNOSTIC] Nombre de messages trouvés : ${messages.length}`);
+      }
+    }
+    runDiagnostic();
+  }, [currentSessionId]);
 
   // Store user calculations / lock selections for custom provider models
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>(() => {
@@ -144,9 +168,9 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
   const [tokenPreset, setTokenPreset] = useState<number>(() => {
     try {
       const saved = localStorage.getItem('ratiss_token_preset');
-      return saved ? parseInt(saved, 10) : 1000;
+      return saved ? parseInt(saved, 10) : 60000;
     } catch {
-      return 1000;
+      return 60000;
     }
   });
 
@@ -156,7 +180,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
       localStorage.setItem('ratiss_token_preset', preset.toString());
     } catch {}
     
-    const presetLabel = preset === 200 ? 'MARGE (200)' : preset === 1000 ? 'MOYEN (1000)' : 'MAXIMUM (8000)';
+    const presetLabel = preset === 200 ? 'RAPIDE (200)' : preset === 8000 ? 'ÉLEVÉ (8000)' : preset === 20000 ? 'MAXIMUM (20000)' : 'ULTIME (60000)';
     setConsoleEntries(prev => [
       ...prev,
       {
@@ -391,11 +415,16 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
         body: JSON.stringify({ jargonTerms, activeProviderId: providerId, apiKey: candidateApiKey, selectedModel: selectedModels[providerId] || "" }),
       });
 
+      if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) {
+        throw new Error(`API Error: Serveur indisponible ou erreur (${response.status})`);
+      }
       const resData = await response.json();
       if (resData.success) {
         const resultObj = { secteurs: resData.secteurs, concept: resData.concept, logique: resData.logique, application: resData.application };
         setLastCollision(resultObj);
         localStorage.setItem('ratiss_last_collision', JSON.stringify(resultObj));
+        window.dispatchEvent(new Event('storage'));
+        window.dispatchEvent(new Event('storage_archive_update'));
         const sigma = parseFloat(((1 - hallucinating.delta * 0.45)).toFixed(2));
         
         if (isSupabaseConfigured && supabase) {
@@ -429,13 +458,18 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
     setHallucinating(prev => ({ ...prev, delta, distortion }));
   };
 
-  const handleAddJargonBinding = (concept: string, jargon: string) => {
+  const handleAddJargonBinding = async (concept: string, jargon: string) => {
     const conceptCleaned = concept.toLowerCase().trim();
     const matchedSector = sectors.find(s => s.id === conceptCleaned || s.name.toLowerCase() === conceptCleaned || s.codename.toLowerCase() === conceptCleaned);
     const sourceSectorId = matchedSector ? matchedSector.id : 'philosophie';
     setLastSedimentedSectorId(sourceSectorId);
     setPulseTrigger(prev => prev + 1);
     setJargonTerms(prev => [{ concept, jargon, timestamp: new Date().toLocaleTimeString() }, ...prev]);
+    
+    // Persist to ratiss memory
+    if (currentSessionId) {
+      await sauvegarderMessage(currentSessionId, 'system', `[SÉDIMENTATION CONCEPT] : ${concept}(:)${jargon}`);
+    }
   };
 
   const handleUpdateApiPriority = (id: string, newPriority: number) => {
@@ -497,6 +531,10 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
 
         if (parsed && typeof parsed === 'object') {
           if (parsed.reponse) finalResponse = parsed.reponse;
+          else if (parsed.response) finalResponse = parsed.response;
+          else if (parsed.réponse) finalResponse = parsed.réponse;
+          else if (parsed.pensees && !parsed.reponse) finalResponse = "[RÉFLEXION SANS RÉPONSE]";
+          
           action = parsed.action || '';
           pensees = parsed.pensees || '';
         }
@@ -512,8 +550,23 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
         action: action,
         pensees: pensees
       }]);
+      
+      // Persist to ratiss memory
+      if (currentSessionId) {
+        sauvegarderMessage(currentSessionId, 'user', text);
+        sauvegarderMessage(currentSessionId, 'assistant', finalResponse);
+      }
     } catch (err: any) {
       console.error(err);
+      setApiProviders(prev => prev.map(p => p.id === providerId ? { ...p, status: 'error' } : p));
+      setConsoleEntries(prev => [...prev, { 
+        id: generateUniqueId('resp-err'), 
+        timestamp: new Date().toLocaleTimeString(), 
+        text: `Défaillance du nœud ${providerId}. Déviation de sécurité activée. Veuillez relancer la requête.`, 
+        type: 'response',
+        action: 'Bascule Auto',
+        pensees: 'Interception de la trame corrompue.'
+      }]);
     } finally {
       setIsPending(false);
     }
@@ -603,7 +656,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
                   >
                     SYNC AUTO
                   </button>
-                  {[200, 1000, 8000].map(val => (
+                  {[200, 8000, 20000, 60000].map(val => (
                     <button
                       key={val}
                       onClick={() => {
@@ -616,7 +669,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
                           : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-750'
                       }`}
                     >
-                      {val === 200 ? 'MIN' : val === 1000 ? 'MED' : 'MAX'}<br/>({val})
+                      {val === 200 ? 'MIN' : val === 8000 ? 'HAUT' : val === 20000 ? 'MAX' : 'ULTI'}<br/>({val})
                     </button>
                   ))}
                 </div>
@@ -634,7 +687,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({ userId }) => {
 
               {tokenMode === 'AUTO' && (
                 <p className="text-[10px] text-slate-500 italic text-center">
-                  En mode AUTO, RATISS analyse ton message pour ajuster les ressources (200 à 8000 tokens).
+                  En mode AUTO, RATISS analyse ton message pour ajuster les ressources (200 à 60000 tokens).
                 </p>
               )}
             </div>

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Brain, Zap, Loader2, Sparkles, Terminal, Info, Copy, Check, RefreshCw, Maximize2, Minimize2, ChevronDown, ChevronRight, Hash, Search } from 'lucide-react';
+import { sauvegarderMessage } from '../lib/ratissMemory';
 import { supabase, isSupabaseConfigured } from '../supabase';
 import { ConceptExtended } from '../types';
 import { ArreterAbsolumentToutAudio, gererFluxAudioUnique } from '../ratissAudioCore';
@@ -154,6 +155,9 @@ export default function MoteurSynthese({ activeProviderId, apiKey, selectedModel
         })
       });
 
+      if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) {
+        throw new Error(`API Error: Serveur indisponible ou erreur (${response.status})`);
+      }
       const data = await response.json();
 
       if (data.success && data.concepts && data.concepts.length > 0) {

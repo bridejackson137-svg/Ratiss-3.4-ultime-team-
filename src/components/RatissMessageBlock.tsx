@@ -22,20 +22,40 @@ export const RatissMessageBlock: React.FC<{ rawJson: string }> = ({ rawJson }) =
       const premierIndex = rawJson.indexOf('{');
       const dernierIndex = rawJson.lastIndexOf('}');
 
-      if (premierIndex !== -1 && dernierIndex !== -1) {
-        const jsonPropre = rawJson.substring(premierIndex, dernierIndex + 1);
+      let jsonPropre = rawJson;
+      if (premierIndex !== -1 && dernierIndex !== -1 && dernierIndex > premierIndex) {
+        jsonPropre = rawJson.substring(premierIndex, dernierIndex + 1);
         setData(JSON.parse(jsonPropre));
       } else {
-        throw new Error("Payload corrompu");
+        throw new Error("Payload incomplet ou introuvable");
       }
-    } catch (e) {
-      console.warn("[RATISS PARSER] Structure non standard, repli sur texte brute.");
-      setData({
-        pensees: "Analyse brute",
-        action: "Affichage Texte",
-        reponse: rawJson, // Sécurité : affiche la chaîne brute si le JSON est complètement cassé
-        statut: "DÉGRADÉ"
-      });
+    } catch (erreur) {
+      console.warn("[RATISS UI] Flux JSON incomplet ou interrompu. Tentative de réparation...");
+      
+      // Si le flux a été coupé avant la fermeture de l'objet
+      let fluxRepare = rawJson.trim();
+      const premierIndex = fluxRepare.indexOf('{');
+      if (premierIndex !== -1) {
+        fluxRepare = fluxRepare.substring(premierIndex);
+      }
+      
+      // On force la fermeture des chaînes et des accolades manquantes
+      if (!fluxRepare.endsWith("}")) {
+        // Si la coupure a eu lieu au milieu d'une valeur de clé
+        fluxRepare += '", "statut": "INTERROMPU_REPARE" }';
+      }
+      
+      try {
+        setData(JSON.parse(fluxRepare));
+      } catch (e) {
+        // Secours ultime si la chaîne est trop détruite
+        setData({
+          pensees: "Erreur critique de troncation.",
+          action: "Affichage fallback",
+          reponse: "Le flux de données a été interrompu par le serveur. Veuillez reformuler ou augmenter le paramètre max_tokens.",
+          statut: "ERREUR_FLUX"
+        });
+      }
     }
   }, [rawJson]);
 
@@ -59,7 +79,7 @@ export const RatissMessageBlock: React.FC<{ rawJson: string }> = ({ rawJson }) =
     <div className="p-4 bg-gray-900 border border-gray-800 rounded-xl font-mono text-white max-w-xl shadow-md">
       {/* En-tête technique */}
       <div className="flex justify-between items-center text-[10px] text-gray-500 mb-3 uppercase tracking-wider">
-        <span>⚙️ {data.action}</span>
+        <span>⚙️ PROTOCOLE ACTIF</span>
         <span className={data.statut === 'DÉGRADÉ' ? 'text-red-400' : 'text-green-400'}>
           ● {data.statut}
         </span>

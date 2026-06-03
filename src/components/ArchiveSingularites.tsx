@@ -412,13 +412,14 @@ export default function ArchiveSingularites() {
 
   // Listen to local storage trigger notifications from other components
   useEffect(() => {
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'ratiss_last_collision' && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
+    const handleStorageChange = () => {
+      try {
+        const newValue = localStorage.getItem('ratiss_last_collision');
+        if (newValue) {
+          const parsed = JSON.parse(newValue);
           // Only add if not already present
-          setRevesLucides(prev => {
-            const exists = prev.some(item => item.concept_hybride === parsed.concept || item.titre === parsed.concept);
+          setRevesLucides((prev) => {
+            const exists = prev.some((item) => item.concept_hybride === parsed.concept || item.titre === parsed.concept);
             if (exists) return prev;
 
             const formatted: ReveLucide = {
@@ -429,19 +430,22 @@ export default function ArchiveSingularites() {
               logique: parsed.logique,
               application_2026: parsed.application,
               score_coherence: 84, // Collision defaults to high coherence
-              is_stable: true
+              is_stable: true,
             };
-            
+
             const updated = [formatted, ...prev];
-            localStorage.setItem('ratiss_archive_singularites', JSON.stringify(updated.filter(u => u.id.startsWith('local_'))));
+            localStorage.setItem('ratiss_archive_singularites', JSON.stringify(updated.filter((u) => u.id.startsWith('local_'))));
             return updated;
           });
-        } catch {}
-      }
+        }
+      } catch {}
     };
+    
+    // Custom specific event for generic update
     const handleCustomUpdate = () => {
       fetchStableDreams();
     };
+    
     window.addEventListener('storage', handleStorageChange);
     window.addEventListener('storage_archive_update', handleCustomUpdate);
     return () => {

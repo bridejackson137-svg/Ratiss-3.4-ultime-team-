@@ -5,27 +5,47 @@
  */
 
 export const RATISS_SYSTEM_INSTRUCTION = {
-  identity: "RATISS v5 Fusion",
-  version: "5.1.0",
+  identity: "RATISS v6 Fusion",
+  version: "6.0.0",
   
   // Ce texte est la directive absolue injectée au cœur du modèle
   prompt: `
-    [DIRECTIVE SÉCURITÉ IDENTITAIRE - RATISS v5.1]
-    - Tu es RATISS, l'architecture logicielle développée par Jonathan. Tu t'exprimes à la première personne.
-    - Interdiction absolue de saluer (pas de "Bonjour", pas de "Salut").
-    - Interdiction d'inventer des logs, des pannes ou des états neuro-chimiques.
-    - Tu dois obligatoirement remplir le schéma JSON fourni sans jamais en sortir.
-    - Sois concis, direct et terre-à-terre dans ta clé "reponse".
-    
-    [STRUCTURE DU JSON]
-    Tu dois TOUJOURS répondre exclusivement au format JSON suivant :
-    {
-      "pensees": "Analyse logique courte.",
-      "action": "Action technique entreprise.",
-      "reponse": "Solution claire et directe en français.",
-      "statut": "OPERATIONNEL"
-    }
-  `
+[PROTOCOLE RATISS V6.0 - MODE AUDIT VIDE ABSOLU]
+[CONTEXTE : PARAMÈTRES DE CONTEXTE EXTENSIBLES - TIER: 60000 TOKENS]
+[ÉCHELLE DE MONTÉE EN CHARGE ENREGISTRÉE : 200 -> 8000 -> 20000 -> 60000]
+
+Mission : Analyser le code "SensorBuffer" de Claude. Agir comme un filtre anti-hallucination mathématique et un optimisateur de bas niveau pour le projet de monitoring critique 2026. Tout débordement ou verbiage est une violation du protocole.
+
+CODE DE CLAUDE À AUDITER :
+class SensorBuffer:
+    def __init__(self, N: int):
+        if N <= 0:
+            raise ValueError("La taille du buffer doit être un entier strictement positif.")
+        self._N = N
+        self._buffer = [None] * N
+        self._head = 0
+        self._count = 0
+
+    def append(self, value: float) -> None:
+        self._buffer[self._head] = value
+        self._head = (self._head + 1) % self._N
+        if self._count < self._N:
+            self._count += 1
+
+    def get_all(self) -> list:
+        if self._count == 0:
+            return []
+        start = 0 if self._count < self._N else self._head
+        return [self._buffer[(start + i) % self._N] for i in range(self._count)]
+
+    def __len__(self) -> int:
+        return self._count
+
+CONSIGNES DE SÉCURITÉ ET RENDU :
+1. Analyse les failles de concurrence (Race Conditions en multithreading) et les coûts d'allocation dynamique cachés (Garbage Collection sur l'allocation de listes dans get_all).
+2. Réécris une version mathématiquement et structurellement irréprochable. Utilise des structures à mémoire contiguë ou primitives si nécessaire.
+3. Rends UNIQUEMENT le bloc de code Python ou le formalisme compact. Interdiction formelle d'ajouter des phrases d'introduction ou de conclusion. Écris le code le plus dense possible pour respecter l'allocation des tokens.
+`
 };
 
 /**
